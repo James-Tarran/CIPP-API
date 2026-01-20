@@ -5039,5 +5039,19 @@
     "addedDate": "2025-06-19",
     "powershellEquivalent": "Set-User -Identity $user -RemotePowerShellEnabled $false",
     "recommendedBy": ["CIS", "CIPP"]
+  },
+    {
+    "name": "standards.DisableSSPR",
+    "cat": "Entra (AAD) Standards",
+    "tag": ["CIS M365 5.0 (6.1.1)", "Security", "NIST CSF 2.0 (PR.AA-05)"],
+    "helpText": "Disables Self Service Password Reset for all users",
+    "docsDescription": "Disables Self Service Password Reset for all users",
+    "executiveText": "Disables Self Service Password Reset for all users",
+    "label": "Disable Self Service Password Reset",
+    "impact": "Medium Impact",
+    "impactColour": "warning",
+    "addedDate": "2026-01-20",
+    "powershellEquivalent": "Update-MgBetaPolicyAuthenticationMethodPolicyAuthenticationMethodConfiguration",
+    "recommendedBy": ["CIS", "CIPP"]
   }
 ]
