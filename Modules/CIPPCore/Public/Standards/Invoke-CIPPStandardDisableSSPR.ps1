@@ -8,13 +8,13 @@ function Invoke-CIPPStandardDisableSSPR {
         (Label) Disable SSPR
     .DESCRIPTION
         (Helptext) Disables the self service password reset feature for all accounts in a tenant.
-        (DocsDescription) Disbles SSPR to be compliant with recommended security standards.
+        (DocsDescription) Administrators should follow more stringent password reset procedures rather than self-service options.
     .NOTES
         CAT
             Global Standards
         TAG
         EXECUTIVETEXT
-            Disbles SSPR to be compliant with recommended security standards.
+            Administrators should not be allowed to use self-service password reset (SSPR) for enhanced security. Admin accounts require more stringent security controls and should follow formal password reset procedures that involve additional verification steps rather than self-service options. This ensures that administrative account password resets are properly audited and controlled.
         ADDEDCOMPONENT
         IMPACT
             Low Impact

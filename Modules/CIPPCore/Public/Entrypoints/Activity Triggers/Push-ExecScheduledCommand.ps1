@@ -329,7 +329,7 @@ function Push-ExecScheduledCommand {
         Write-Information 'Scheduler: Sending the results to the target.'
         Write-Information "The content of results is: $Results"
         switch -wildcard ($task.PostExecution) {
-            '*psa*' { Send-CIPPAlert -Type 'psa' -Title $title -HTMLContent $HTML -TenantFilter $Tenant }
+            '*psa*' { Send-CIPPAlert -Type 'psa' -Title $title -HTMLContent $HTML -TenantFilter $Tenant -PSATicketId $task.Parameters.psaticketid }
             '*email*' { Send-CIPPAlert -Type 'email' -Title $title -HTMLContent $HTML -TenantFilter $Tenant }
             '*webhook*' {
                 $Webhook = [PSCustomObject]@{

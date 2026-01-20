@@ -20,7 +20,12 @@ function New-CippExtAlert {
                     Write-Host "MappedId: $MappedId"
                     if (!$mappedId) { $MappedId = 1 }
                     Write-Host "MappedId: $MappedId"
-                    New-HaloPSATicket -Title $Alert.AlertTitle -Description $Alert.AlertText -Client $mappedId
+                    New-HaloPSATicket `
+                        -Title $Alert.AlertTitle `
+                        -Description $Alert.AlertText `
+                        -Client $mappedId `
+                        -TicketId $Alert.TicketId
+
                 }
             }
             'Gradient' {
