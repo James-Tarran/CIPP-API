@@ -19,7 +19,14 @@ function Get-CIPPAlertSmtpAuthSuccess {
         $SignIns = New-GraphGetRequest -uri $uri -tenantid $TenantFilter
 
         # Select only the properties you care about
-        $AlertData = $SignIns.value | Select-Object userPrincipalName, createdDateTime, clientAppUsed, ipAddress, @{Name = 'Tenant'; Expression = { $TenantFilter } }
+        $AlertData = @(
+            $SignIns.value | Select-Object `
+                userPrincipalName,
+                createdDateTime,
+                clientAppUsed,
+                ipAddress,
+                @{ Name = 'Tenant'; Expression = { $TenantFilter } }
+        )
 
         # Write results into the alert pipeline
         Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
