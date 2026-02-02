@@ -8,6 +8,7 @@ function Get-CIPPAlertSmtpAuthSuccess {
         [Parameter(Mandatory = $false)]
         [Alias('input')]
         $InputValue,
+
         $TenantFilter
     )
 
@@ -16,17 +17,32 @@ function Get-CIPPAlertSmtpAuthSuccess {
         $uri = "https://graph.microsoft.com/v1.0/auditLogs/signIns?`$filter=clientAppUsed eq 'Authenticated SMTP' and status/errorCode eq 0"
 
         # Call Graph API for the given tenant
-        $SignIns = New-GraphGetRequest -uri $uri -tenantid $TenantFilter
+        $SignIns = New-GraphGetRequest -Uri $uri -TenantId $TenantFilter
 
-        # Select only the properties you care about
-        $AlertData = $SignIns.value | Select-Object userPrincipalName, createdDateTime, clientAppUsed, ipAddress, status, @{Name = 'Tenant'; Expression = { $TenantFilter } }
+        if (-not $SignIns.value) {
+            return
+        }
+
+        # FORCE array output (important for CIPP AddRange)
+        $AlertData = @(
+            $SignIns.value | Select-Object `
+                userPrincipalName,
+                createdDateTime,
+                clientAppUsed,
+                ipAddress,
+                status,
+                @{ Name = 'Tenant'; Expression = { $TenantFilter } }
+        )
 
         # Write results into the alert pipeline
-        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
+        Write-AlertTrace `
+            -CmdletName $MyInvocation.MyCommand `
+            -TenantFilter $TenantFilter `
+            -Data $AlertData
 
-    } catch {
-        # Suppress errors if no data returned
-        # Uncomment if you want explicit error logging
-        Write-AlertMessage -tenant $($TenantFilter) -message "Failed to query SMTP AUTH sign-ins for $($TenantFilter): $(Get-NormalizedError -message $_.Exception.message)"
+    }
+    catch {
+        # Optional logging if desired
+        # Write-AlertMessage -Tenant $TenantFilter -Message "Failed SMTP AUTH sign-in query: $($_.Exception.Message)"
     }
 }
