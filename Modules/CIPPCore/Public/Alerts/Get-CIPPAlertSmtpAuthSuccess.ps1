@@ -1,47 +1,32 @@
 function Get-CIPPAlertSmtpAuthSuccess {
+    <#
+    .FUNCTIONALITY
+        Entrypoint – Check sign-in logs for SMTP AUTH with success status
+    #>
     [CmdletBinding()]
     param (
-        # REQUIRED: absorbs the ScheduledCommand object
-        [Parameter(ValueFromPipeline = $true)]
-        [object]$ScheduledCommand,
-
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
+        [Alias('input')]
+        $InputValue,
         $TenantFilter
     )
 
-    begin {
-        $Results = @()
-    }
-
-    process {
-        # Intentionally empty
-        # This stops the orchestrator object from flowing further
-    }
-
-    end {
+    try {
+        # Graph API endpoint for sign-ins
         $uri = "https://graph.microsoft.com/v1.0/auditLogs/signIns?`$filter=clientAppUsed eq 'Authenticated SMTP' and status/errorCode eq 0"
-        $SignIns = New-GraphGetRequest -Uri $uri -TenantId $TenantFilter
 
-        if ($SignIns.value) {
-            $Results = @(
-                $SignIns.value | ForEach-Object {
-                    [pscustomobject]@{
-                        Tenant            = $TenantFilter
-                        UserPrincipalName = $_.userPrincipalName
-                        CreatedDateTime   = $_.createdDateTime
-                        ClientAppUsed     = $_.clientAppUsed
-                        IPAddress         = $_.ipAddress
-                        ErrorCode         = $_.status.errorCode
-                    }
-                }
-            )
+        # Call Graph API for the given tenant
+        $SignIns = New-GraphGetRequest -uri $uri -tenantid $TenantFilter
 
-            Write-AlertTrace `
-                -cmdletName $MyInvocation.MyCommand `
-                -tenantFilter $TenantFilter `
-                -data $Results
-        }
+        # Select only the properties you care about
+        $AlertData = $SignIns.value | Select-Object userPrincipalName, createdDateTime, clientAppUsed, ipAddress, @{Name = 'Tenant'; Expression = { $TenantFilter } }
 
-        return $Results
+        # Write results into the alert pipeline
+        Write-AlertTrace -cmdletName $MyInvocation.MyCommand -tenantFilter $TenantFilter -data $AlertData
+
+    } catch {
+        # Suppress errors if no data returned
+        # Uncomment if you want explicit error logging
+        # Write-AlertMessage -tenant $($TenantFilter) -message "Failed to query SMTP AUTH sign-ins for $($TenantFilter): $(Get-NormalizedError -message $_.Exception.message)"
     }
 }
