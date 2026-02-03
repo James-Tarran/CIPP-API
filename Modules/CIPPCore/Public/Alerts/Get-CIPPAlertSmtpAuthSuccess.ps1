@@ -11,25 +11,32 @@ function Get-CIPPAlertSmtpAuthSuccess {
         $SignIns = New-GraphGetRequest -Uri $uri -TenantId $TenantFilter
 
         if (-not $SignIns.value) {
-            return
+            return @()
         }
 
         $AlertData = @(
-            $SignIns.value | Select-Object `
-                userPrincipalName,
-                createdDateTime,
-                clientAppUsed,
-                ipAddress,
-                status,
-                @{ Name = 'Tenant'; Expression = { $TenantFilter } }
+            $SignIns.value | ForEach-Object {
+                [pscustomobject]@{
+                    Tenant            = $TenantFilter
+                    UserPrincipalName = $_.userPrincipalName
+                    CreatedDateTime   = $_.createdDateTime
+                    ClientAppUsed     = $_.clientAppUsed
+                    IPAddress         = $_.ipAddress
+                    ErrorCode         = $_.status.errorCode
+                }
+            }
         )
 
+        # Log for dedupe / history
         Write-AlertTrace `
             -cmdletName $MyInvocation.MyCommand `
             -tenantFilter $TenantFilter `
             -data $AlertData
+
+        # 🔑 THIS IS THE CRITICAL LINE
+        return $AlertData
     }
     catch {
-        return
+        return @()
     }
 }
