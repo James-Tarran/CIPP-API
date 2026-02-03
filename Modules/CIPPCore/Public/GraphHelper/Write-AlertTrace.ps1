@@ -1,10 +1,8 @@
 function Write-AlertTrace {
     <#
     .FUNCTIONALITY
-        Internal function. Writes alert trace data and guarantees
-        a consistent array return type for schedulers.
+    Internal function. Pleases most of Write-AlertTrace for alerting purposes
     #>
-    [CmdletBinding()]
     param(
         $cmdletName,
         $data,
@@ -12,60 +10,39 @@ function Write-AlertTrace {
         [string]$PartitionKey = (Get-Date -UFormat '%Y%m%d').ToString(),
         [string]$AlertComment = $null
     )
-
-    # -----------------------------
-    # Normalize input data EARLY
-    # -----------------------------
-    if ($null -eq $data) {
-        $data = @()
-    }
-    elseif ($data -is [string] -or $data -isnot [System.Collections.IEnumerable]) {
-        $data = @($data)
-    }
-
     $Table = Get-CIPPTable -tablename AlertLastRun
-
+    #Get current row and compare the $logData object. If it's the same, don't write it.
+    $Row = Get-CIPPAzDataTableEntity @table -Filter "RowKey eq '$($tenantFilter)-$($cmdletName)' and PartitionKey eq '$PartitionKey'"
     try {
-        # Get existing row (if any)
-        $Row = Get-CIPPAzDataTableEntity @Table -Filter "RowKey eq '$($tenantFilter)-$($cmdletName)' and PartitionKey eq '$PartitionKey'"
-
-        $CurrentJson = ConvertTo-Json -InputObject $data -Compress -Depth 10 | Out-String
-        $PreviousJson = $Row.LogData
-
-        # Only write if data changed
-        if ($PreviousJson -ne $CurrentJson) {
+        $RowData = $Row.LogData
+        $Compare = Compare-Object $RowData (ConvertTo-Json -InputObject $data -Compress -Depth 10 | Out-String)
+        if ($Compare) {
+            $LogData = ConvertTo-Json -InputObject $data -Compress -Depth 10 | Out-String
             $TableRow = @{
-                PartitionKey = $PartitionKey
-                RowKey       = "$($tenantFilter)-$($cmdletName)"
-                CmdletName   = "$cmdletName"
-                Tenant       = "$tenantFilter"
-                LogData      = [string]$CurrentJson
-                AlertComment = [string]$AlertComment
+                'PartitionKey' = $PartitionKey
+                'RowKey'       = "$($tenantFilter)-$($cmdletName)"
+                'CmdletName'   = "$cmdletName"
+                'Tenant'       = "$tenantFilter"
+                'LogData'      = [string]$LogData
+                'AlertComment' = [string]$AlertComment
             }
-
             $Table.Entity = $TableRow
             Add-CIPPAzDataTableEntity @Table -Force | Out-Null
+            return $data
         }
-
     } catch {
-        # First run or lookup failure — always write
-        $CurrentJson = ConvertTo-Json -InputObject $data -Compress -Depth 10 | Out-String
-
+        $LogData = ConvertTo-Json -InputObject $data -Compress -Depth 10 | Out-String
         $TableRow = @{
-            PartitionKey = $PartitionKey
-            RowKey       = "$($tenantFilter)-$($cmdletName)"
-            CmdletName   = "$cmdletName"
-            Tenant       = "$tenantFilter"
-            LogData      = [string]$CurrentJson
-            AlertComment = [string]$AlertComment
+            'PartitionKey' = $PartitionKey
+            'RowKey'       = "$($tenantFilter)-$($cmdletName)"
+            'CmdletName'   = "$cmdletName"
+            'Tenant'       = "$tenantFilter"
+            'LogData'      = [string]$LogData
+            'AlertComment' = [string]$AlertComment
         }
-
         $Table.Entity = $TableRow
         Add-CIPPAzDataTableEntity @Table -Force | Out-Null
+        return $data
     }
 
-    # -----------------------------
-    # ALWAYS return an array
-    # -----------------------------
-    return $data
 }
