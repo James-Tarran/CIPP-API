@@ -63,51 +63,49 @@ function Invoke-CIPPStandardUserSubmissions {
     } catch {
         $ErrorMessage = Get-NormalizedError -Message $_.Exception.Message
         Write-LogMessage -API 'Standards' -Tenant $Tenant -Message "Could not get the UserSubmissions state for $Tenant. Error: $ErrorMessage" -Sev Error
-        return
     }
-
-    $PolicyExists = ($null -ne $PolicyState -and $PolicyState.Count -gt 0)
-    $RuleExists = ($null -ne $RuleState -and $RuleState.Count -gt 0)
 
     if ($state -eq 'enable') {
         if (([string]::IsNullOrWhiteSpace($Email))) {
-            $PolicyIsCorrect = $PolicyExists -and
-            ($PolicyState.EnableReportToMicrosoft -eq $true) -and
+            $PolicyIsCorrect = ($PolicyState.EnableReportToMicrosoft -eq $true) -and
             ($PolicyState.ReportJunkToCustomizedAddress -eq $false) -and
-            ([string]::IsNullOrWhiteSpace($PolicyState.ReportJunkAddresses)) -and
             ($PolicyState.ReportNotJunkToCustomizedAddress -eq $false) -and
-            ([string]::IsNullOrWhiteSpace($PolicyState.ReportNotJunkAddresses)) -and
             ($PolicyState.ReportPhishToCustomizedAddress -eq $false) -and
-            ([string]::IsNullOrWhiteSpace($PolicyState.ReportPhishAddresses))
-            $RuleIsCorrect = $true
+            ($PolicyState.ReportJunkAddresses.Count -eq 0) -and
+            ($PolicyState.ReportNotJunkAddresses.Count -eq 0) -and
+            ($PolicyState.ReportPhishAddresses.Count -eq 0)
+            $RuleIsCorrect = ($RuleState.length -eq 0) -or ($RuleState.State -ne 'Enabled')
         } else {
-            $PolicyIsCorrect = $PolicyExists -and
-            ($PolicyState.EnableReportToMicrosoft -eq $true) -and
+            $PolicyIsCorrect = ($PolicyState.EnableReportToMicrosoft -eq $true) -and
             ($PolicyState.ReportJunkToCustomizedAddress -eq $true) -and
-            ($PolicyState.ReportJunkAddresses.Count -eq 1 -and $PolicyState.ReportJunkAddresses -contains $Email) -and
+            ($PolicyState.ReportJunkAddresses -eq $Email) -and
             ($PolicyState.ReportNotJunkToCustomizedAddress -eq $true) -and
-            ($PolicyState.ReportNotJunkAddresses.Count -eq 1 -and $PolicyState.ReportNotJunkAddresses -contains $Email) -and
+            ($PolicyState.ReportNotJunkAddresses -eq $Email) -and
             ($PolicyState.ReportPhishToCustomizedAddress -eq $true) -and
-            ($PolicyState.ReportPhishAddresses.Count -eq 1 -and $PolicyState.ReportPhishAddresses -contains $Email)
-            $RuleIsCorrect = $RuleExists -and
-            ($RuleState.State -eq 'Enabled') -and
-            ($RuleState.SentTo.Count -eq 1 -and $RuleState.SentTo -contains $Email)
+            ($PolicyState.ReportPhishAddresses -eq $Email)
+            $RuleIsCorrect = ($RuleState.State -eq 'Enabled') -and
+            ($RuleState.SentTo -eq $Email)
         }
     } else {
-        $PolicyIsCorrect = $PolicyExists -and
-        ($PolicyState.EnableReportToMicrosoft -eq $false) -and
-        ($PolicyState.ReportJunkToCustomizedAddress -eq $false) -and
-        ([string]::IsNullOrWhiteSpace($PolicyState.ReportJunkAddresses)) -and
-        ($PolicyState.ReportNotJunkToCustomizedAddress -eq $false) -and
-        ([string]::IsNullOrWhiteSpace($PolicyState.ReportNotJunkAddresses)) -and
-        ($PolicyState.ReportPhishToCustomizedAddress -eq $false) -and
-        ([string]::IsNullOrWhiteSpace($PolicyState.ReportPhishAddresses))
-        $RuleIsCorrect = !$RuleExists -or ($RuleState.State -eq 'Disabled')
+        if ($PolicyState.length -eq 0) {
+            $PolicyIsCorrect = $true
+            $RuleIsCorrect = $true
+        } else {
+            $PolicyIsCorrect = ($PolicyState.EnableReportToMicrosoft -eq $false) -and
+            ($PolicyState.ReportJunkToCustomizedAddress -eq $false) -and
+            ($PolicyState.ReportNotJunkToCustomizedAddress -eq $false) -and
+            ($PolicyState.ReportPhishToCustomizedAddress -eq $false) -and
+            ($PolicyState.ReportJunkAddresses.Count -eq 0) -and
+            ($PolicyState.ReportNotJunkAddresses.Count -eq 0) -and
+            ($PolicyState.ReportPhishAddresses.Count -eq 0)
+            $RuleIsCorrect = ($RuleState.length -eq 0) -or ($RuleState.State -ne 'Enabled')
+        }
     }
 
     $StateIsCorrect = $PolicyIsCorrect -and $RuleIsCorrect
 
     if ($Settings.remediate -eq $true) {
+        # If policy is set correctly, log and skip setting the policy
         if ($StateIsCorrect -eq $true) {
             Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy is already configured' -sev Info
         } else {
@@ -148,7 +146,7 @@ function Invoke-CIPPStandardUserSubmissions {
                 }
             }
 
-            if (!$PolicyExists) {
+            if ($PolicyState.length -eq 0) {
                 try {
                     $null = New-ExoRequest -tenantid $Tenant -cmdlet 'New-ReportSubmissionPolicy' -cmdParams $PolicyParams -UseSystemMailbox $true
                     Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy created.' -sev Info
@@ -168,7 +166,7 @@ function Invoke-CIPPStandardUserSubmissions {
             }
 
             if ($RuleParams) {
-                if (!$RuleExists) {
+                if ($RuleState.length -eq 0) {
                     try {
                         $RuleParams.Add('Name', 'DefaultReportSubmissionRule')
                         $RuleParams.Add('ReportSubmissionPolicy', 'DefaultReportSubmissionPolicy')
@@ -188,14 +186,13 @@ function Invoke-CIPPStandardUserSubmissions {
                         Write-LogMessage -API 'Standards' -tenant $Tenant -message "Failed to enable User Submission rule. Error: $($ErrorMessage.NormalizedError)" -sev Error
                     }
                 }
-            } elseif ($state -eq 'disable' -and $RuleExists) {
+            } elseif ($RuleState.length -gt 0 -and $RuleState.State -eq 'Enabled') {
                 try {
-                    $DisableRuleParams = @{ Identity = 'DefaultReportSubmissionRule' }
-                    $null = New-ExoRequest -tenantid $Tenant -cmdlet 'Disable-ReportSubmissionRule' -cmdParams $DisableRuleParams -UseSystemMailbox $true
-                    Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission rule disabled.' -sev Info
+                    $null = New-ExoRequest -tenantid $Tenant -cmdlet 'Remove-ReportSubmissionRule' -cmdParams @{ Identity = 'DefaultReportSubmissionRule' } -UseSystemMailbox $true
+                    Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission rule removed.' -sev Info
                 } catch {
                     $ErrorMessage = Get-CippException -Exception $_
-                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Failed to disable User Submission rule. Error: $($ErrorMessage.NormalizedError)" -sev Error
+                    Write-LogMessage -API 'Standards' -tenant $Tenant -message "Failed to remove User Submission rule. Error: $($ErrorMessage.NormalizedError)" -sev Error
                 }
             }
         }
@@ -206,7 +203,7 @@ function Invoke-CIPPStandardUserSubmissions {
         if ($StateIsCorrect -eq $true) {
             Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy is properly configured.' -sev Info
         } else {
-            if ($PolicyState.EnableReportToMicrosoft -eq $true) {
+            if ($Policy.EnableReportToMicrosoft -eq $true) {
                 Write-StandardsAlert -message 'User Submission policy is enabled but incorrectly configured' -object $PolicyState -tenant $Tenant -standardName 'UserSubmissions' -standardId $Settings.standardId
                 Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy is enabled but incorrectly configured' -sev Info
             } else {
@@ -217,7 +214,7 @@ function Invoke-CIPPStandardUserSubmissions {
     }
 
     if ($Settings.report -eq $true) {
-        if (!$PolicyExists) {
+        if ($PolicyState.length -eq 0) {
             Add-CIPPBPAField -FieldName 'UserSubmissionPolicy' -FieldValue $false -StoreAs bool -Tenant $Tenant
         } else {
             Add-CIPPBPAField -FieldName 'UserSubmissionPolicy' -FieldValue $StateIsCorrect -StoreAs bool -Tenant $Tenant
@@ -235,7 +232,7 @@ function Invoke-CIPPStandardUserSubmissions {
             ReportNotJunkAddresses           = $PolicyState.ReportNotJunkAddresses
             ReportPhishAddresses             = $PolicyState.ReportPhishAddresses
             RuleState                        = @{
-                State  = $RuleState.State
+                State  = if ($RuleState.length -eq 0) { 'Disabled' } else { $RuleState.State }
                 SentTo = $RuleState.SentTo
             }
         }
