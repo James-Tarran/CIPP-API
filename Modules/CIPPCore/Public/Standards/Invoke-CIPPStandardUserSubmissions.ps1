@@ -228,12 +228,12 @@ function Invoke-CIPPStandardUserSubmissions {
             ReportJunkToCustomizedAddress    = $PolicyState.ReportJunkToCustomizedAddress
             ReportNotJunkToCustomizedAddress = $PolicyState.ReportNotJunkToCustomizedAddress
             ReportPhishToCustomizedAddress   = $PolicyState.ReportPhishToCustomizedAddress
-            ReportJunkAddresses              = $PolicyState.ReportJunkAddresses
-            ReportNotJunkAddresses           = $PolicyState.ReportNotJunkAddresses
-            ReportPhishAddresses             = $PolicyState.ReportPhishAddresses
+            ReportJunkAddresses              = @($PolicyState.ReportJunkAddresses)
+            ReportNotJunkAddresses           = @($PolicyState.ReportNotJunkAddresses)
+            ReportPhishAddresses             = @($PolicyState.ReportPhishAddresses)
             RuleState                        = @{
                 State  = if ($RuleState.length -eq 0) { 'Disabled' } else { $RuleState.State }
-                SentTo = $RuleState.SentTo
+                SentTo = if ($RuleState.length -eq 0) { $null } else { @($RuleState.SentTo) }
             }
         }
         $ExpectedValue = @{
@@ -241,13 +241,13 @@ function Invoke-CIPPStandardUserSubmissions {
             ReportJunkToCustomizedAddress    = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
             ReportNotJunkToCustomizedAddress = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
             ReportPhishToCustomizedAddress   = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
-            ReportJunkAddresses              = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
-            ReportNotJunkAddresses           = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
-            ReportPhishAddresses             = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
-            RuleState                        = if ([string]::IsNullOrWhiteSpace($Email)) {
+            ReportJunkAddresses              = @(if (-not [string]::IsNullOrWhiteSpace($Email)) { $Email })
+            ReportNotJunkAddresses           = @(if (-not [string]::IsNullOrWhiteSpace($Email)) { $Email })
+            ReportPhishAddresses             = @(if (-not [string]::IsNullOrWhiteSpace($Email)) { $Email })
+            RuleState                        = if ([string]::IsNullOrWhiteSpace($Email) -or $state -eq 'disable') {
                 @{
                     State  = 'Disabled'
-                    SentTo = @()
+                    SentTo = $null
                 }
             } else {
                 @{
