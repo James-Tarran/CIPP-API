@@ -241,13 +241,13 @@ function Invoke-CIPPStandardUserSubmissions {
             ReportJunkToCustomizedAddress    = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
             ReportNotJunkToCustomizedAddress = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
             ReportPhishToCustomizedAddress   = if ([string]::IsNullOrWhiteSpace($Email)) { $false } else { $true }
-            ReportJunkAddresses              = if ([string]::IsNullOrWhiteSpace($Email)) { $null } else { @($Email) }
-            ReportNotJunkAddresses           = if ([string]::IsNullOrWhiteSpace($Email)) { $null } else { @($Email) }
-            ReportPhishAddresses             = if ([string]::IsNullOrWhiteSpace($Email)) { $null } else { @($Email) }
+            ReportJunkAddresses              = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
+            ReportNotJunkAddresses           = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
+            ReportPhishAddresses             = if ([string]::IsNullOrWhiteSpace($Email)) { @() } else { @($Email) }
             RuleState                        = if ([string]::IsNullOrWhiteSpace($Email)) {
                 @{
                     State  = 'Disabled'
-                    SentTo = $null
+                    SentTo = @()
                 }
             } else {
                 @{
