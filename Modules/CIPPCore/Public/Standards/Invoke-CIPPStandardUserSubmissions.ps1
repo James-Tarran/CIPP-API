@@ -186,7 +186,7 @@ function Invoke-CIPPStandardUserSubmissions {
         if ($StateIsCorrect -eq $true) {
             Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy is properly configured.' -sev Info
         } else {
-            if ($Policy.EnableReportToMicrosoft -eq $true) {
+            if ($PolicyState.EnableReportToMicrosoft -eq $true) {
                 Write-StandardsAlert -message 'User Submission policy is enabled but incorrectly configured' -object $PolicyState -tenant $Tenant -standardName 'UserSubmissions' -standardId $Settings.standardId
                 Write-LogMessage -API 'Standards' -tenant $Tenant -message 'User Submission policy is enabled but incorrectly configured' -sev Info
             } else {
