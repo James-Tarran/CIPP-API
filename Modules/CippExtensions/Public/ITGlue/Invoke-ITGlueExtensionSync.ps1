@@ -206,7 +206,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'first-name'      = if ($User.givenName) { $User.givenName } else { $User.displayName }
                             'last-name'       = $User.surname
                             title             = $User.jobTitle
-                            'contact-emails'  = @(@{ value = $User.userPrincipalName; primary = $true; label = 'Work' })
+                            'contact-emails'  = @(@{ value = $User.userPrincipalName; primary = $true; 'label-name' = 'Work' })
                         }
 
                         if ($ExistingContact) {
