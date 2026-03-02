@@ -65,6 +65,15 @@ Function Invoke-ExecExtensionTest {
                     $Results = [pscustomobject]@{'Results' = 'Failed to connect to Hudu, check your API credentials and try again.' }
                 }
             }
+            'ITGlue' {
+                $Conn = Connect-ITGlueAPI -Configuration $Configuration
+                $Orgs = Invoke-ITGlueRequest -Method GET -Endpoint '/organizations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -PageSize 1 -FirstPageOnly
+                if ($Orgs) {
+                    $Results = [pscustomobject]@{'Results' = "Successfully connected to ITGlue. Found $($Orgs.Count) organisation(s) on first page." }
+                } else {
+                    $Results = [pscustomobject]@{'Results' = 'Failed to connect to ITGlue. Check your API key and region setting.' }
+                }
+            }
             'Sherweb' {
                 $token = Get-SherwebAuthentication
                 if ($token) {
