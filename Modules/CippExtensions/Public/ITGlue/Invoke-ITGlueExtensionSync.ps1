@@ -38,8 +38,8 @@ function Invoke-ITGlueExtensionSync {
         $ExtensionCache = Get-CippExtensionReportingData -TenantFilter $Tenant.defaultDomainName -IncludeMailboxes
 
         # License friendly-name table
-        Set-Location (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName
-        $LicTable = Import-Csv ConversionTable.csv
+        $ModuleBase = Get-Module -Name CippExtensions | Select-Object -ExpandProperty ModuleBase
+        $LicTable = Import-Csv (Join-Path $ModuleBase 'ConversionTable.csv')
 
         # CIPP URL for deep links
         $ConfigTable = Get-CIPPTable -tablename 'Config'
@@ -174,6 +174,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("User FA [$($User.userPrincipalName)]: $_")
                     }
@@ -214,6 +215,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'contacts' -Attributes $ContactAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Contact [$($User.userPrincipalName)]: $_")
                     }
@@ -276,6 +278,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Device FA [$($Device.deviceName)]: $_")
                     }
@@ -339,6 +342,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'configurations' -Attributes $ConfigAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Config [$($Device.deviceName)]: $_")
                     }
@@ -351,7 +355,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         }
 
         # ─────────────────────────────────────────────────────────────────────
-        # M365 OVERVIEW — update organisation quick-notes
+        # M365 OVERVIEW — update organisation quick-notes (preserving existing content)
         # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
@@ -371,7 +375,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     '<p>No license data available</p>'
                 }
 
-                $QuickNotes = @"
+                # CIPP managed section with markers for preservation
+                $CippMarkerStart = '<!-- CIPP-MANAGED-START -->'
+                $CippMarkerEnd = '<!-- CIPP-MANAGED-END -->'
+                $CippSection = @"
+$CippMarkerStart
+<hr/>
 <h3>Microsoft 365 Overview</h3>
 <p><strong>Tenant:</strong> $($Tenant.displayName)<br/>
 <strong>Tenant ID:</strong> <code>$($Tenant.customerId)</code><br/>
@@ -392,7 +401,23 @@ $LicenseTable
 <a href="https://entra.microsoft.com/$($Tenant.defaultDomainName)" target="_blank">Entra Admin</a></p>
 
 <p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC (CIPP Managed)</em></p>
+$CippMarkerEnd
 "@
+
+                # Get existing quick-notes from the organization
+                $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
+                $ExistingNotes = $ExistingOrg.'quick-notes'
+
+                if ($ExistingNotes -and $ExistingNotes -match [regex]::Escape($CippMarkerStart)) {
+                    # Replace existing CIPP section
+                    $QuickNotes = $ExistingNotes -replace "(?s)$([regex]::Escape($CippMarkerStart)).*?$([regex]::Escape($CippMarkerEnd))", $CippSection
+                } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
+                    # Append CIPP section to existing content
+                    $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
+                } else {
+                    # No existing content, just use CIPP section (without leading hr)
+                    $QuickNotes = $CippSection -replace '<hr/>\s*', ''
+                }
 
                 $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'organizations' -ResourceId $OrgId -Attributes @{
                     'quick-notes' = $QuickNotes
