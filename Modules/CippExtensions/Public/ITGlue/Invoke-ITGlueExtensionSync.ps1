@@ -38,8 +38,8 @@ function Invoke-ITGlueExtensionSync {
         $ExtensionCache = Get-CippExtensionReportingData -TenantFilter $Tenant.defaultDomainName -IncludeMailboxes
 
         # License friendly-name table
-        Set-Location (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName
-        $LicTable = Import-Csv ConversionTable.csv
+        $ModuleBase = Get-Module -Name CippExtensions | Select-Object -ExpandProperty ModuleBase
+        $LicTable = Import-Csv (Join-Path $ModuleBase 'ConversionTable.csv')
 
         # CIPP URL for deep links
         $ConfigTable = Get-CIPPTable -tablename 'Config'
@@ -174,6 +174,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("User FA [$($User.userPrincipalName)]: $_")
                     }
@@ -214,6 +215,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'contacts' -Attributes $ContactAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Contact [$($User.userPrincipalName)]: $_")
                     }
@@ -276,6 +278,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Device FA [$($Device.deviceName)]: $_")
                     }
@@ -339,6 +342,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'configurations' -Attributes $ConfigAttribs
                         }
+                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Config [$($Device.deviceName)]: $_")
                     }
