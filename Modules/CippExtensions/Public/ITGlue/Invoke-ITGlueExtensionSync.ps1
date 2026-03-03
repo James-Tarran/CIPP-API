@@ -355,7 +355,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         }
 
         # ─────────────────────────────────────────────────────────────────────
-        # M365 OVERVIEW — update organisation quick-notes
+        # M365 OVERVIEW — update organisation quick-notes (preserving existing content)
         # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
@@ -375,7 +375,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     '<p>No license data available</p>'
                 }
 
-                $QuickNotes = @"
+                # CIPP managed section with markers for preservation
+                $CippMarkerStart = '<!-- CIPP-MANAGED-START -->'
+                $CippMarkerEnd = '<!-- CIPP-MANAGED-END -->'
+                $CippSection = @"
+$CippMarkerStart
+<hr/>
 <h3>Microsoft 365 Overview</h3>
 <p><strong>Tenant:</strong> $($Tenant.displayName)<br/>
 <strong>Tenant ID:</strong> <code>$($Tenant.customerId)</code><br/>
@@ -396,7 +401,23 @@ $LicenseTable
 <a href="https://entra.microsoft.com/$($Tenant.defaultDomainName)" target="_blank">Entra Admin</a></p>
 
 <p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC (CIPP Managed)</em></p>
+$CippMarkerEnd
 "@
+
+                # Get existing quick-notes from the organization
+                $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
+                $ExistingNotes = $ExistingOrg.'quick-notes'
+
+                if ($ExistingNotes -and $ExistingNotes -match [regex]::Escape($CippMarkerStart)) {
+                    # Replace existing CIPP section
+                    $QuickNotes = $ExistingNotes -replace "(?s)$([regex]::Escape($CippMarkerStart)).*?$([regex]::Escape($CippMarkerEnd))", $CippSection
+                } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
+                    # Append CIPP section to existing content
+                    $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
+                } else {
+                    # No existing content, just use CIPP section (without leading hr)
+                    $QuickNotes = $CippSection -replace '<hr/>\s*', ''
+                }
 
                 $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'organizations' -ResourceId $OrgId -Attributes @{
                     'quick-notes' = $QuickNotes
