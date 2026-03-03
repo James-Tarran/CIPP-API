@@ -351,40 +351,55 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         }
 
         # ─────────────────────────────────────────────────────────────────────
-        # DOMAINS — update organisation quick-notes with verified domain list
+        # M365 OVERVIEW — update organisation quick-notes
         # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
                 $VerifiedDomains = ($Domains | Where-Object { $_.isVerified -eq $true }).id -join ', '
-                $LicenseSummary = if ($Licenses) {
-                    ($Licenses | Where-Object { $_.prepaidUnits.enabled -gt 0 } | ForEach-Object {
-                        $Name = ($LicTable | Where-Object { $_.SkuId -eq $_.skuId }).ProductName
-                        if (!$Name) { $Name = $_.skuPartNumber }
-                        "$Name ($($_.consumedUnits) / $($_.prepaidUnits.enabled))"
-                    }) -join "`n"
-                } else { 'No license data' }
+
+                # Build license table rows
+                $LicenseRows = if ($Licenses) {
+                    foreach ($License in ($Licenses | Where-Object { $_.prepaidUnits.enabled -gt 0 } | Sort-Object -Property skuPartNumber)) {
+                        $FriendlyName = ($LicTable | Where-Object { $_.SkuId -eq $License.skuId }).ProductName
+                        if (-not $FriendlyName) { $FriendlyName = $License.skuPartNumber }
+                        "<tr><td>$FriendlyName</td><td>$($License.consumedUnits) / $($License.prepaidUnits.enabled)</td></tr>"
+                    }
+                }
+                $LicenseTable = if ($LicenseRows) {
+                    "<table><thead><tr><th>License</th><th>Used / Total</th></tr></thead><tbody>$($LicenseRows -join '')</tbody></table>"
+                } else {
+                    '<p>No license data available</p>'
+                }
 
                 $QuickNotes = @"
---- Microsoft 365 Overview (CIPP Managed) ---
-Tenant: $($Tenant.displayName)
-Tenant ID: $($Tenant.customerId)
-Default Domain: $($Tenant.defaultDomainName)
-Verified Domains: $VerifiedDomains
-Licensed Users: $($CompanyResult.Users)
-Managed Devices: $($CompanyResult.Devices)
+<h3>Microsoft 365 Overview</h3>
+<p><strong>Tenant:</strong> $($Tenant.displayName)<br/>
+<strong>Tenant ID:</strong> <code>$($Tenant.customerId)</code><br/>
+<strong>Default Domain:</strong> $($Tenant.defaultDomainName)</p>
 
-Licenses:
-$LicenseSummary
+<p><strong>Verified Domains:</strong> $VerifiedDomains</p>
 
-Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
+<table>
+<tr><td><strong>Licensed Users</strong></td><td>$($CompanyResult.Users)</td></tr>
+<tr><td><strong>Managed Devices</strong></td><td>$($CompanyResult.Devices)</td></tr>
+</table>
+
+<h4>Licenses</h4>
+$LicenseTable
+
+<p><a href="$CIPPURL/tenant/administration/tenants?customerId=$($Tenant.customerId)" target="_blank">View in CIPP</a> |
+<a href="https://admin.microsoft.com/Partner/BeginClientSession.aspx?CTID=$($Tenant.customerId)" target="_blank">M365 Admin</a> |
+<a href="https://entra.microsoft.com/$($Tenant.defaultDomainName)" target="_blank">Entra Admin</a></p>
+
+<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC (CIPP Managed)</em></p>
 "@
 
                 $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'organizations' -ResourceId $OrgId -Attributes @{
                     'quick-notes' = $QuickNotes
                 }
-                $CompanyResult.Logs.Add("Domains: Updated organisation quick-notes with $($Domains.Count) domains")
+                $CompanyResult.Logs.Add("M365 Overview: Updated organisation quick-notes")
             } catch {
-                $CompanyResult.Errors.Add("Domains block failed: $_")
+                $CompanyResult.Errors.Add("M365 Overview block failed: $_")
             }
         }
 
