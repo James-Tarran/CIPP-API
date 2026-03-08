@@ -359,7 +359,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
-                $VerifiedDomains = ($Domains | Where-Object { $_.isVerified -eq $true }).id -join ', '
+                $VerifiedDomainList = ($Domains | Where-Object { $_.isVerified -eq $true }).id
+                $VerifiedDomains = if ($VerifiedDomainList) {
+                    '<ul>' + (($VerifiedDomainList | ForEach-Object { "<li>$_</li>" }) -join '') + '</ul>'
+                } else {
+                    '<p>None</p>'
+                }
 
                 # Build license table rows
                 $LicenseRows = if ($Licenses) {
@@ -389,7 +394,8 @@ $CippMarkerStart
 <strong>Tenant ID:</strong> <code>$($Tenant.customerId)</code><br/>
 <strong>Default Domain:</strong> $($Tenant.defaultDomainName)</p>
 
-<p><strong>Verified Domains:</strong> $VerifiedDomains</p>
+<p><strong>Verified Domains:</strong></p>
+$VerifiedDomains
 
 <table>
 <tr><td><strong>Licensed Users</strong></td><td>$($CompanyResult.Users)</td></tr>
