@@ -375,9 +375,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     '<p>No license data available</p>'
                 }
 
-                # CIPP managed section with markers for preservation
-                $CippMarkerStart = '<!-- CIPP-MANAGED-START -->'
-                $CippMarkerEnd = '<!-- CIPP-MANAGED-END -->'
+                # CIPP managed section wrapped in a <div> with a class attribute.
+                # HTML comments (<!-- -->) are stripped by ITGlue's sanitizer, so we
+                # use a real element as our marker instead.
+                $CippMarkerStart = '<div class="cipp-managed">'
+                $CippMarkerEnd = '</div>'
+
                 $CippSection = @"
 $CippMarkerStart
 <hr/>
@@ -408,12 +411,27 @@ $CippMarkerEnd
                 $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
                 $ExistingNotes = $ExistingOrg.'quick-notes'
 
-                if ($ExistingNotes -and $ExistingNotes -match [regex]::Escape($CippMarkerStart)) {
-                    # Replace existing CIPP section
-                    $QuickNotes = $ExistingNotes -replace "(?s)$([regex]::Escape($CippMarkerStart)).*?$([regex]::Escape($CippMarkerEnd))", $CippSection
-                } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
-                    # Append CIPP section to existing content
-                    $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
+                if ($ExistingNotes) {
+                    # Try matching our <div class="cipp-managed"> wrapper first
+                    if ($ExistingNotes -match '<div class="cipp-managed">') {
+                        $QuickNotes = $ExistingNotes -replace '(?s)<div class="cipp-managed">.*?</div>', $CippSection
+                    }
+                    # Legacy: match old HTML comment markers (in case ITGlue kept them)
+                    elseif ($ExistingNotes -match '<!-- CIPP-MANAGED-START -->') {
+                        $QuickNotes = $ExistingNotes -replace '(?s)<!-- CIPP-MANAGED-START -->.*?<!-- CIPP-MANAGED-END -->', $CippSection
+                    }
+                    # Fallback: detect orphaned CIPP content by matching on the heading
+                    # and the "(CIPP Managed)" timestamp that we always write
+                    elseif ($ExistingNotes -match '<h3>Microsoft 365 Overview</h3>' -and $ExistingNotes -match '\(CIPP Managed\)') {
+                        $QuickNotes = $ExistingNotes -replace '(?s)(<hr\s*/?>)?\s*<h3>Microsoft 365 Overview</h3>.*?\(CIPP Managed\)</em></p>', $CippSection
+                    }
+                    # No previous CIPP section found - append below existing user content
+                    elseif ($ExistingNotes.Trim()) {
+                        $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
+                    }
+                    else {
+                        $QuickNotes = $CippSection -replace '<hr/>\s*', ''
+                    }
                 } else {
                     # No existing content, just use CIPP section (without leading hr)
                     $QuickNotes = $CippSection -replace '<hr/>\s*', ''
