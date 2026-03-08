@@ -417,27 +417,14 @@ $CippMarkerEnd
                 $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
                 $ExistingNotes = $ExistingOrg.'quick-notes'
 
-                if ($ExistingNotes) {
-                    # Try matching our <div class="cipp-managed"> wrapper first
-                    if ($ExistingNotes -match '<div class="cipp-managed">') {
-                        $QuickNotes = $ExistingNotes -replace '(?s)<div class="cipp-managed">.*?</div>', $CippSection
-                    }
-                    # Legacy: match old HTML comment markers (in case ITGlue kept them)
-                    elseif ($ExistingNotes -match '<!-- CIPP-MANAGED-START -->') {
-                        $QuickNotes = $ExistingNotes -replace '(?s)<!-- CIPP-MANAGED-START -->.*?<!-- CIPP-MANAGED-END -->', $CippSection
-                    }
-                    # Fallback: detect orphaned CIPP content by matching on the heading
-                    # and the "(CIPP Managed)" timestamp that we always write
-                    elseif ($ExistingNotes -match '<h3>Microsoft 365 Overview</h3>' -and $ExistingNotes -match '\(CIPP Managed\)') {
-                        $QuickNotes = $ExistingNotes -replace '(?s)(<hr\s*/?>)?\s*<h3>Microsoft 365 Overview</h3>.*?\(CIPP Managed\)</em></p>', $CippSection
-                    }
+                if ($ExistingNotes -and $ExistingNotes -match '\(CIPP Managed\)') {
+                    # Content-based match: use GREEDY .* to capture everything from
+                    # the first M365 Overview heading to the LAST (CIPP Managed) stamp,
+                    # removing all duplicate CIPP sections in one sweep.
+                    $QuickNotes = $ExistingNotes -replace '(?s)(<hr\s*/?>)?\s*<h3>Microsoft 365 Overview</h3>.*(CIPP Managed)</em></p>', $CippSection
+                } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
                     # No previous CIPP section found - append below existing user content
-                    elseif ($ExistingNotes.Trim()) {
-                        $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
-                    }
-                    else {
-                        $QuickNotes = $CippSection -replace '<hr/>\s*', ''
-                    }
+                    $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
                 } else {
                     # No existing content, just use CIPP section (without leading hr)
                     $QuickNotes = $CippSection -replace '<hr/>\s*', ''
