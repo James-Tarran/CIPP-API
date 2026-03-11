@@ -130,6 +130,23 @@ Function Invoke-ExecExtensionMapping {
     $StatusCode = [HttpStatusCode]::InternalServerError
   }
 
+  try {
+    if ($Request.Query.CreateCAType) {
+      switch ($Request.Query.CreateCAType) {
+        'ITGlue' {
+          $Result = New-ITGlueCAPolicyAssetType
+        }
+      }
+    }
+    $StatusCode = [HttpStatusCode]::OK
+  }
+  catch {
+    $ErrorMessage = Get-CippException -Exception $_
+    $Result = "Create CA Type API failed. $($ErrorMessage.NormalizedError)"
+    Write-LogMessage -API $APIName -headers $Headers -message $Result -Sev 'Error' -LogData $ErrorMessage
+    $StatusCode = [HttpStatusCode]::InternalServerError
+  }
+
   return ([HttpResponseContext]@{
       StatusCode = $StatusCode
       Body       = $Result
