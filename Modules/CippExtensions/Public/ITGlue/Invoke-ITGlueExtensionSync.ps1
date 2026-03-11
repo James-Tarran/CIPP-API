@@ -33,6 +33,7 @@ function Invoke-ITGlueExtensionSync {
         $OrgId = $TenantMap.IntegrationId
         $PeopleTypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'Users' }).IntegrationId
         $DeviceTypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'Devices' }).IntegrationId
+        $CATypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'ConditionalAccessPolicies' }).IntegrationId
 
         # Get M365 cached data
         $ExtensionCache = Get-CippExtensionReportingData -TenantFilter $Tenant.defaultDomainName -IncludeMailboxes
@@ -351,6 +352,327 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                 $CompanyResult.Logs.Add("Native Configurations: Processed $($SyncDevices.Count) devices")
             } catch {
                 $CompanyResult.Errors.Add("Native Configurations block failed: $_")
+            }
+        }
+
+        # ─────────────────────────────────────────────────────────────────────
+        # CONDITIONAL ACCESS POLICIES — FLEXIBLE ASSETS
+        # ─────────────────────────────────────────────────────────────────────
+        if (![string]::IsNullOrEmpty($CATypeId)) {
+            try {
+                $CAPolicies = $ExtensionCache.ConditionalAccess
+                if ($CAPolicies -and $CAPolicies.Count -gt 0) {
+                    # Fetch reference data for ID resolution
+                    $Requests = @(
+                        @{ id = 'namedLocations'; url = 'identity/conditionalAccess/namedLocations'; method = 'GET' }
+                        @{ id = 'roleDefinitions'; url = 'roleManagement/directory/roleDefinitions?$select=id,displayName'; method = 'GET' }
+                        @{ id = 'servicePrincipals'; url = 'servicePrincipals?$top=999&$select=appId,displayName'; method = 'GET' }
+                        @{ id = 'applications'; url = 'applications?$top=999&$select=appId,displayName'; method = 'GET' }
+                    )
+                    $BulkResults = New-GraphBulkRequest -Requests $Requests -tenantid $Tenant.defaultDomainName -asapp $true
+
+                    $NamedLocations = ($BulkResults | Where-Object { $_.id -eq 'namedLocations' }).body.value
+                    $RoleDefinitions = ($BulkResults | Where-Object { $_.id -eq 'roleDefinitions' }).body.value
+                    $ServicePrincipals = ($BulkResults | Where-Object { $_.id -eq 'servicePrincipals' }).body.value
+                    $Applications = ($BulkResults | Where-Object { $_.id -eq 'applications' }).body.value
+
+                    # Helper functions for ID resolution
+                    function Get-ResolvedLocationName {
+                        param($Id)
+                        if ($Id -eq 'All') { return 'All' }
+                        if ($Id -eq 'AllTrusted') { return 'All trusted locations' }
+                        $Location = $NamedLocations | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+                        if ($Location) { return $Location.displayName }
+                        return $Id
+                    }
+
+                    function Get-ResolvedRoleName {
+                        param($Id)
+                        if ($Id -eq 'All') { return 'All' }
+                        $Role = $RoleDefinitions | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+                        if ($Role) { return $Role.displayName }
+                        return $Id
+                    }
+
+                    function Get-ResolvedAppName {
+                        param($Id)
+                        if ($Id -eq 'All') { return 'All' }
+                        if ($Id -eq 'None') { return 'None' }
+                        if ($Id -eq 'Office365') { return 'Office 365' }
+                        if ($Id -eq 'MicrosoftAdminPortals') { return 'Microsoft Admin Portals' }
+                        $App = $ServicePrincipals | Where-Object { $_.appId -eq $Id } | Select-Object -First 1
+                        if (!$App) { $App = $Applications | Where-Object { $_.appId -eq $Id } | Select-Object -First 1 }
+                        if (!$App) { $App = $Applications | Where-Object { $_.id -eq $Id } | Select-Object -First 1 }
+                        if ($App) { return $App.displayName }
+                        return $Id
+                    }
+
+                    function Get-ResolvedUserOrGroupName {
+                        param($Id)
+                        if ($Id -eq 'All') { return 'All users' }
+                        if ($Id -eq 'None') { return 'None' }
+                        if ($Id -eq 'GuestsOrExternalUsers') { return 'All guest and external users' }
+                        $User = $Users | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+                        if ($User) { return "$($User.displayName) ($($User.userPrincipalName))" }
+                        $Group = $AllGroups | Where-Object { $_.id -eq $Id } | Select-Object -First 1
+                        if ($Group) { return $Group.displayName }
+                        return $Id
+                    }
+
+                    # Get existing CA Policy assets for this org
+                    $ExistingCAAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
+                        'filter[flexible_asset_type_id]' = $CATypeId
+                        'filter[organization_id]'        = $OrgId
+                    }
+
+                    foreach ($Policy in $CAPolicies) {
+                        try {
+                            # Determine Users include type
+                            $UsersIncludeType = 'None'
+                            if ($Policy.conditions.users.includeUsers -contains 'All') {
+                                $UsersIncludeType = 'All users'
+                            } elseif ($Policy.conditions.users.includeUsers -contains 'GuestsOrExternalUsers' -or $Policy.conditions.users.includeGuestsOrExternalUsers) {
+                                $UsersIncludeType = 'All guest and external users'
+                            } elseif ($Policy.conditions.users.includeUsers -or $Policy.conditions.users.includeGroups -or $Policy.conditions.users.includeRoles) {
+                                $UsersIncludeType = 'Select users and groups'
+                            }
+
+                            # Determine Users exclude type
+                            $UsersExcludeType = 'None'
+                            if ($Policy.conditions.users.excludeUsers -contains 'GuestsOrExternalUsers' -or $Policy.conditions.users.excludeGuestsOrExternalUsers) {
+                                $UsersExcludeType = 'All guest and external users'
+                            } elseif ($Policy.conditions.users.excludeUsers -or $Policy.conditions.users.excludeGroups -or $Policy.conditions.users.excludeRoles) {
+                                $UsersExcludeType = 'Select users and groups'
+                            }
+
+                            # Resolve included users and groups
+                            $IncludedUsersAndGroups = @()
+                            if ($Policy.conditions.users.includeUsers) {
+                                $IncludedUsersAndGroups += $Policy.conditions.users.includeUsers | Where-Object { $_ -notin @('All', 'GuestsOrExternalUsers', 'None') } | ForEach-Object { Get-ResolvedUserOrGroupName -Id $_ }
+                            }
+                            if ($Policy.conditions.users.includeGroups) {
+                                $IncludedUsersAndGroups += $Policy.conditions.users.includeGroups | ForEach-Object { Get-ResolvedUserOrGroupName -Id $_ }
+                            }
+
+                            # Resolve excluded users and groups
+                            $ExcludedUsersAndGroups = @()
+                            if ($Policy.conditions.users.excludeUsers) {
+                                $ExcludedUsersAndGroups += $Policy.conditions.users.excludeUsers | Where-Object { $_ -notin @('All', 'GuestsOrExternalUsers', 'None') } | ForEach-Object { Get-ResolvedUserOrGroupName -Id $_ }
+                            }
+                            if ($Policy.conditions.users.excludeGroups) {
+                                $ExcludedUsersAndGroups += $Policy.conditions.users.excludeGroups | ForEach-Object { Get-ResolvedUserOrGroupName -Id $_ }
+                            }
+
+                            # Resolve directory roles
+                            $IncludedRoles = ($Policy.conditions.users.includeRoles | ForEach-Object { Get-ResolvedRoleName -Id $_ }) -join "`n"
+                            $ExcludedRoles = ($Policy.conditions.users.excludeRoles | ForEach-Object { Get-ResolvedRoleName -Id $_ }) -join "`n"
+
+                            # Determine Target resources include type
+                            $TargetResourcesInclude = 'None'
+                            if ($Policy.conditions.applications.includeApplications -contains 'All') {
+                                $TargetResourcesInclude = 'All cloud apps'
+                            } elseif ($Policy.conditions.applications.includeUserActions) {
+                                $TargetResourcesInclude = 'User actions'
+                            } elseif ($Policy.conditions.applications.includeAuthenticationContextClassReferences) {
+                                $TargetResourcesInclude = 'Authentication context'
+                            } elseif ($Policy.conditions.applications.includeApplications) {
+                                $TargetResourcesInclude = 'Select apps'
+                            }
+
+                            # Resolve applications
+                            $SelectApps = ($Policy.conditions.applications.includeApplications | Where-Object { $_ -notin @('All', 'None') } | ForEach-Object { Get-ResolvedAppName -Id $_ }) -join "`n"
+                            $ExcludedApps = ($Policy.conditions.applications.excludeApplications | ForEach-Object { Get-ResolvedAppName -Id $_ }) -join "`n"
+
+                            # Determine Network include type
+                            $NetworkInclude = 'Any network or location'
+                            if ($Policy.conditions.locations.includeLocations -contains 'All') {
+                                $NetworkInclude = 'Any network or location'
+                            } elseif ($Policy.conditions.locations.includeLocations -contains 'AllTrusted') {
+                                $NetworkInclude = 'All trusted networks and locations'
+                            } elseif ($Policy.conditions.locations.includeLocations) {
+                                $NetworkInclude = 'Selected networks and locations'
+                            }
+
+                            # Determine Network exclude type
+                            $NetworkExclude = 'None'
+                            if ($Policy.conditions.locations.excludeLocations -contains 'AllTrusted') {
+                                $NetworkExclude = 'All trusted networks and locations'
+                            } elseif ($Policy.conditions.locations.excludeLocations) {
+                                $NetworkExclude = 'Selected networks and locations'
+                            }
+
+                            # Resolve locations
+                            $IncludeLocations = ($Policy.conditions.locations.includeLocations | Where-Object { $_ -notin @('All', 'AllTrusted') } | ForEach-Object { Get-ResolvedLocationName -Id $_ }) -join "`n"
+                            $ExcludeLocations = ($Policy.conditions.locations.excludeLocations | Where-Object { $_ -notin @('All', 'AllTrusted') } | ForEach-Object { Get-ResolvedLocationName -Id $_ }) -join "`n"
+
+                            # Determine Grant or Block
+                            $GrantOrBlock = if ($Policy.grantControls.builtInControls -contains 'block') { 'Block access' } else { 'Grant access' }
+
+                            # Authentication strength
+                            $AuthStrength = $Policy.grantControls.authenticationStrength.displayName
+
+                            # Device filter
+                            $DeviceFilterMode = 'Not configured'
+                            if ($Policy.conditions.devices.deviceFilter.mode) {
+                                $DeviceFilterMode = switch ($Policy.conditions.devices.deviceFilter.mode) {
+                                    'include' { 'Include' }
+                                    'exclude' { 'Exclude' }
+                                    default { 'Not configured' }
+                                }
+                            }
+
+                            # Session controls
+                            $SignInFreqEnabled = [bool]$Policy.sessionControls.signInFrequency.isEnabled
+                            $SignInFreqValue = $Policy.sessionControls.signInFrequency.value
+                            $SignInFreqType = $Policy.sessionControls.signInFrequency.type
+                            if ($Policy.sessionControls.signInFrequency.frequencyInterval -eq 'everyTime') {
+                                $SignInFreqType = 'everyTime'
+                            }
+
+                            $PersistentBrowserEnabled = [bool]$Policy.sessionControls.persistentBrowser.isEnabled
+                            $PersistentBrowserMode = $Policy.sessionControls.persistentBrowser.mode
+
+                            $CAEMode = 'Not configured'
+                            if ($Policy.sessionControls.continuousAccessEvaluation.mode) {
+                                $CAEMode = switch ($Policy.sessionControls.continuousAccessEvaluation.mode) {
+                                    'disabled' { 'Disabled' }
+                                    'strictEnforcement' { 'Strictly enforced' }
+                                    default { 'Not configured' }
+                                }
+                            }
+
+                            # Build traits hashtable
+                            $Traits = @{
+                                'policy-name'                                     = $Policy.displayName
+                                'policy-description'                              = $Policy.description
+                                'policy-state'                                    = $Policy.state
+
+                                # Users
+                                'users-include'                                   = $UsersIncludeType
+                                'included-guest-or-external-roles'                = if ($Policy.conditions.users.includeGuestsOrExternalUsers) { ($Policy.conditions.users.includeGuestsOrExternalUsers | ConvertTo-Json -Depth 5) } else { '' }
+                                'included-directory-roles'                        = $IncludedRoles
+                                'included-users-and-groups'                       = ($IncludedUsersAndGroups -join "`n")
+                                'users-exclude'                                   = $UsersExcludeType
+                                'excluded-guest-or-external-roles'                = if ($Policy.conditions.users.excludeGuestsOrExternalUsers) { ($Policy.conditions.users.excludeGuestsOrExternalUsers | ConvertTo-Json -Depth 5) } else { '' }
+                                'excluded-directory-roles'                        = $ExcludedRoles
+                                'excluded-users-and-groups'                       = ($ExcludedUsersAndGroups -join "`n")
+
+                                # Target resources
+                                'target-resources-include'                        = $TargetResourcesInclude
+                                'select-apps'                                     = $SelectApps
+                                'user-actions'                                    = ($Policy.conditions.applications.includeUserActions -join "`n")
+                                'authentication-context'                          = ($Policy.conditions.applications.includeAuthenticationContextClassReferences -join "`n")
+                                'target-resources-excluded-cloud-apps'            = $ExcludedApps
+
+                                # Network
+                                'network-include'                                 = $NetworkInclude
+                                'network-include-selected-networks-and-locations' = $IncludeLocations
+                                'network-exclude'                                 = $NetworkExclude
+                                'network-exclude-selected-networks-and-locations' = $ExcludeLocations
+
+                                # User risk
+                                'user-risk-high'                                  = $Policy.conditions.userRiskLevels -contains 'high'
+                                'user-risk-medium'                                = $Policy.conditions.userRiskLevels -contains 'medium'
+                                'user-risk-low'                                   = $Policy.conditions.userRiskLevels -contains 'low'
+
+                                # Sign-in risk
+                                'sign-in-risk-high'                               = $Policy.conditions.signInRiskLevels -contains 'high'
+                                'sign-in-risk-medium'                             = $Policy.conditions.signInRiskLevels -contains 'medium'
+                                'sign-in-risk-low'                                = $Policy.conditions.signInRiskLevels -contains 'low'
+                                'sign-in-risk-no-risk'                            = $Policy.conditions.signInRiskLevels -contains 'none'
+
+                                # Insider risk
+                                'insider-risk-elevated'                           = $Policy.conditions.insiderRiskLevels -contains 'elevated'
+                                'insider-risk-moderate'                           = $Policy.conditions.insiderRiskLevels -contains 'moderate'
+                                'insider-risk-minor'                              = $Policy.conditions.insiderRiskLevels -contains 'minor'
+
+                                # Device platforms - Include
+                                'include-android'                                 = $Policy.conditions.platforms.includePlatforms -contains 'android'
+                                'include-ios'                                     = $Policy.conditions.platforms.includePlatforms -contains 'iOS'
+                                'include-windows'                                 = $Policy.conditions.platforms.includePlatforms -contains 'windows'
+                                'include-macos'                                   = $Policy.conditions.platforms.includePlatforms -contains 'macOS'
+                                'include-linux'                                   = $Policy.conditions.platforms.includePlatforms -contains 'linux'
+                                'include-windows-phone'                           = $Policy.conditions.platforms.includePlatforms -contains 'windowsPhone'
+
+                                # Device platforms - Exclude
+                                'exclude-android'                                 = $Policy.conditions.platforms.excludePlatforms -contains 'android'
+                                'exclude-ios'                                     = $Policy.conditions.platforms.excludePlatforms -contains 'iOS'
+                                'exclude-windows'                                 = $Policy.conditions.platforms.excludePlatforms -contains 'windows'
+                                'exclude-macos'                                   = $Policy.conditions.platforms.excludePlatforms -contains 'macOS'
+                                'exclude-linux'                                   = $Policy.conditions.platforms.excludePlatforms -contains 'linux'
+                                'exclude-windows-phone'                           = $Policy.conditions.platforms.excludePlatforms -contains 'windowsPhone'
+
+                                # Client apps
+                                'client-apps-configured'                          = [bool]$Policy.conditions.clientAppTypes
+                                'browser'                                         = $Policy.conditions.clientAppTypes -contains 'browser'
+                                'mobile-apps-and-desktop-clients'                 = $Policy.conditions.clientAppTypes -contains 'mobileAppsAndDesktopClients'
+                                'exchange-activesync-clients'                     = $Policy.conditions.clientAppTypes -contains 'exchangeActiveSync'
+                                'other-clients'                                   = $Policy.conditions.clientAppTypes -contains 'other'
+
+                                # Device filter
+                                'device-filter-mode'                              = $DeviceFilterMode
+                                'device-filter-rule'                              = $Policy.conditions.devices.deviceFilter.rule
+
+                                # Grant controls
+                                'grant-or-block'                                  = $GrantOrBlock
+                                'grant-controls-operator'                         = $Policy.grantControls.operator
+                                'require-multifactor-authentication'              = $Policy.grantControls.builtInControls -contains 'mfa'
+                                'require-authentication-strength'                 = $AuthStrength
+                                'require-device-to-be-marked-as-compliant'        = $Policy.grantControls.builtInControls -contains 'compliantDevice'
+                                'require-microsoft-entra-hybrid-joined-device'    = $Policy.grantControls.builtInControls -contains 'domainJoinedDevice'
+                                'require-approved-client-app'                     = $Policy.grantControls.builtInControls -contains 'approvedApplication'
+                                'require-app-protection-policy'                   = $Policy.grantControls.builtInControls -contains 'compliantApplication'
+                                'require-password-change'                         = $Policy.grantControls.builtInControls -contains 'passwordChange'
+                                'terms-of-use'                                    = ($Policy.grantControls.termsOfUse -join "`n")
+
+                                # Session controls
+                                'use-app-enforced-restrictions'                   = [bool]$Policy.sessionControls.applicationEnforcedRestrictions.isEnabled
+                                'use-conditional-access-app-control'              = [bool]$Policy.sessionControls.cloudAppSecurity.isEnabled
+                                'conditional-access-app-control-type'             = $Policy.sessionControls.cloudAppSecurity.cloudAppSecurityType
+                                'sign-in-frequency-enabled'                       = $SignInFreqEnabled
+                                'sign-in-frequency-value'                         = "$SignInFreqValue"
+                                'sign-in-frequency-type'                          = $SignInFreqType
+                                'persistent-browser-session-enabled'              = $PersistentBrowserEnabled
+                                'persistent-browser-session-mode'                 = $PersistentBrowserMode
+                                'continuous-access-evaluation'                    = $CAEMode
+                                'disable-resilience-defaults'                     = [bool]$Policy.sessionControls.disableResilienceDefaults
+                                'secure-sign-in-session'                          = [bool]$Policy.sessionControls.secureSignInSession.isEnabled
+
+                                # Metadata
+                                'policy-id'                                       = $Policy.id
+                                'created-date'                                    = if ($Policy.createdDateTime) { $Policy.createdDateTime } else { '' }
+                                'modified-date'                                   = if ($Policy.modifiedDateTime) { $Policy.modifiedDateTime } else { '' }
+                                'cipp-link'                                       = "$CIPPURL/tenant/conditional/list-policies?customerId=$($Tenant.customerId)"
+                                'entra-link'                                      = "https://entra.microsoft.com/$($Tenant.defaultDomainName)/#view/Microsoft_AAD_ConditionalAccess/PolicyBlade/policyId/$($Policy.id)"
+                                'last-synced'                                     = (Get-Date -Format 'yyyy-MM-dd HH:mm') + ' UTC'
+                            }
+
+                            # Find existing asset by policy ID
+                            $ExistingAsset = $ExistingCAAssets | Where-Object { $_.'policy-id' -eq $Policy.id } | Select-Object -First 1
+
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $CATypeId
+                                traits                   = $Traits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                            } else {
+                                $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                            }
+                            Start-Sleep -Milliseconds 100
+                        } catch {
+                            $CompanyResult.Errors.Add("CA Policy FA [$($Policy.displayName)]: $_")
+                        }
+                    }
+
+                    $CompanyResult.Logs.Add("CA Policy Flexible Assets: Processed $($CAPolicies.Count) policies")
+                } else {
+                    $CompanyResult.Logs.Add('CA Policy Flexible Assets: No policies found in cache')
+                }
+            } catch {
+                $CompanyResult.Errors.Add("CA Policy Flexible Assets block failed: $_")
             }
         }
 
