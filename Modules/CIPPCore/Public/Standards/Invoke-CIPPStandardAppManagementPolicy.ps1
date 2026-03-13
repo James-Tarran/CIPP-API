@@ -121,8 +121,9 @@ function Invoke-CIPPStandardAppManagementPolicy {
     }
 
     # Sort desired restrictions by restrictionType so order matches Graph API responses
-    $sortedDesiredPasswordCredentials = @($desiredPasswordCredentials | Sort-Object -Property restrictionType)
-    $sortedDesiredKeyCredentials = @($desiredKeyCredentials | Sort-Object -Property restrictionType)
+    # Use script block because items are hashtables, not PSCustomObjects
+    $sortedDesiredPasswordCredentials = @($desiredPasswordCredentials | Sort-Object { $_.restrictionType })
+    $sortedDesiredKeyCredentials = @($desiredKeyCredentials | Sort-Object { $_.restrictionType })
 
     $desiredState = [PSCustomObject]@{
         isEnabled                   = $true
