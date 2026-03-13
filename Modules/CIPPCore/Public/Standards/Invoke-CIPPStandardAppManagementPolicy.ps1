@@ -120,25 +120,33 @@ function Invoke-CIPPStandardAppManagementPolicy {
         return
     }
 
-    # Build desired state - service principal restrictions mirror application restrictions
+    # Sort desired restrictions by restrictionType so order matches Graph API responses
+    $sortedDesiredPasswordCredentials = @($desiredPasswordCredentials | Sort-Object -Property restrictionType)
+    $sortedDesiredKeyCredentials = @($desiredKeyCredentials | Sort-Object -Property restrictionType)
+
     $desiredState = [PSCustomObject]@{
         isEnabled                   = $true
         applicationRestrictions     = [PSCustomObject]@{
-            passwordCredentials = $desiredPasswordCredentials
-            keyCredentials      = $desiredKeyCredentials
+            passwordCredentials = $sortedDesiredPasswordCredentials
+            keyCredentials      = $sortedDesiredKeyCredentials
         }
         servicePrincipalRestrictions = [PSCustomObject]@{
-            passwordCredentials = $desiredPasswordCredentials
-            keyCredentials      = $desiredKeyCredentials
+            passwordCredentials = $sortedDesiredPasswordCredentials
+            keyCredentials      = $sortedDesiredKeyCredentials
         }
     }
 
-    # Cherry-pick only the properties we manage - New-GraphGetRequest returns a deserialized
-    # PSObject that includes extra top-level properties (id, displayName, description, @odata.*)
+    # Sort current policy arrays the same way for consistent comparison
     $CurrentValue = [PSCustomObject]@{
         isEnabled                   = [bool]$CurrentPolicy.isEnabled
-        applicationRestrictions     = $CurrentPolicy.applicationRestrictions
-        servicePrincipalRestrictions = $CurrentPolicy.servicePrincipalRestrictions
+        applicationRestrictions     = [PSCustomObject]@{
+            passwordCredentials = @($CurrentPolicy.applicationRestrictions.passwordCredentials | Sort-Object -Property restrictionType)
+            keyCredentials      = @($CurrentPolicy.applicationRestrictions.keyCredentials | Sort-Object -Property restrictionType)
+        }
+        servicePrincipalRestrictions = [PSCustomObject]@{
+            passwordCredentials = @($CurrentPolicy.servicePrincipalRestrictions.passwordCredentials | Sort-Object -Property restrictionType)
+            keyCredentials      = @($CurrentPolicy.servicePrincipalRestrictions.keyCredentials | Sort-Object -Property restrictionType)
+        }
     }
 
     $ExpectedValue = [PSCustomObject]@{
@@ -147,12 +155,9 @@ function Invoke-CIPPStandardAppManagementPolicy {
         servicePrincipalRestrictions = $desiredState.servicePrincipalRestrictions
     }
 
-    # Compare individual properties to avoid JSON key-ordering issues
-    $StateIsCorrect = ($CurrentValue.isEnabled -eq $true) -and
-        (($CurrentValue.applicationRestrictions.passwordCredentials | ConvertTo-Json -Depth 10 -Compress) -eq ($ExpectedValue.applicationRestrictions.passwordCredentials | ConvertTo-Json -Depth 10 -Compress)) -and
-        (($CurrentValue.applicationRestrictions.keyCredentials | ConvertTo-Json -Depth 10 -Compress) -eq ($ExpectedValue.applicationRestrictions.keyCredentials | ConvertTo-Json -Depth 10 -Compress)) -and
-        (($CurrentValue.servicePrincipalRestrictions.passwordCredentials | ConvertTo-Json -Depth 10 -Compress) -eq ($ExpectedValue.servicePrincipalRestrictions.passwordCredentials | ConvertTo-Json -Depth 10 -Compress)) -and
-        (($CurrentValue.servicePrincipalRestrictions.keyCredentials | ConvertTo-Json -Depth 10 -Compress) -eq ($ExpectedValue.servicePrincipalRestrictions.keyCredentials | ConvertTo-Json -Depth 10 -Compress))
+    $CurrentJson = $CurrentValue | ConvertTo-Json -Depth 10 -Compress
+    $ExpectedJson = $ExpectedValue | ConvertTo-Json -Depth 10 -Compress
+    $StateIsCorrect = $CurrentJson -eq $ExpectedJson
 
     if ($Settings.remediate -eq $true) {
         if ($StateIsCorrect -eq $true) {
