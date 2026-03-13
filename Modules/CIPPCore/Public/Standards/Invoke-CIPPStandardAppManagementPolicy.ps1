@@ -17,8 +17,7 @@ function Invoke-CIPPStandardAppManagementPolicy {
             Enforces credential restrictions on application registrations and service principals to limit how secrets and certificates are created and how long they remain valid. This reduces the risk of long-lived or unmanaged credentials being used to access your tenant.
         ADDEDCOMPONENT
             {"type":"autoComplete","multiple":false,"creatable":false,"label":"Password Addition","name":"standards.AppManagementPolicy.passwordCredentialsPasswordAddition","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"}]}
-            {"type":"autoComplete","multiple":false,"creatable":false,"label":"Custom Password Addition","name":"standards.AppManagementPolicy.passwordCredentialsCustomPasswordAddition","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"}]}
-            {"type":"autoComplete","multiple":false,"creatable":false,"label":"Symmetric Key Addition","name":"standards.AppManagementPolicy.keyCredentialsSymmetricKeyAddition","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"}]}
+            {"type":"autoComplete","multiple":false,"creatable":false,"label":"Custom Password","name":"standards.AppManagementPolicy.passwordCredentialsCustomPasswordAddition","options":[{"label":"Enabled","value":"enabled"},{"label":"Disabled","value":"disabled"}]}
             {"type":"number","label":"Password Credentials Max Lifetime (Days)","name":"standards.AppManagementPolicy.passwordCredentialsMaxLifetime"}
             {"type":"number","label":"Key Credentials Max Lifetime (Days)","name":"standards.AppManagementPolicy.keyCredentialsMaxLifetime"}
         IMPACT
@@ -45,33 +44,64 @@ function Invoke-CIPPStandardAppManagementPolicy {
         return
     }
 
-    # Unwrap autoComplete/number values - frontend may send {label, value} objects or plain values
+    # Unwrap autoComplete values - frontend sends {label, value} objects, extract the string
+    $passwordAdditionState = [string]($Settings.passwordCredentialsPasswordAddition.value ?? $Settings.passwordCredentialsPasswordAddition)
+    $customPasswordState = [string]($Settings.passwordCredentialsCustomPasswordAddition.value ?? $Settings.passwordCredentialsCustomPasswordAddition)
     $passwordMaxLifetimeDays = $Settings.passwordCredentialsMaxLifetime.value ?? $Settings.passwordCredentialsMaxLifetime
     $keyMaxLifetimeDays = $Settings.keyCredentialsMaxLifetime.value ?? $Settings.keyCredentialsMaxLifetime
+
+    # Convert user-entered days to ISO 8601 duration format (P<n>D)
     $passwordMaxLifetimeISO = if (-not [string]::IsNullOrWhiteSpace($passwordMaxLifetimeDays) -and $passwordMaxLifetimeDays -ne 'Select a value') { "P${passwordMaxLifetimeDays}D" } else { $null }
     $keyMaxLifetimeISO = if (-not [string]::IsNullOrWhiteSpace($keyMaxLifetimeDays) -and $keyMaxLifetimeDays -ne 'Select a value') { "P${keyMaxLifetimeDays}D" } else { $null }
 
-    # Define desired password credential restrictions from settings
-    $PasswordRestrictionDefs = @(
-        @{ Setting = 'passwordCredentialsPasswordAddition';       RestrictionType = 'passwordAddition';       UseSettingAsState = $true }
-        @{ Setting = 'passwordCredentialsMaxLifetime';            RestrictionType = 'passwordLifetime';       UseSettingAsState = $false; FixedState = 'enabled'; Lifetime = $passwordMaxLifetimeISO }
-        @{ Setting = 'passwordCredentialsCustomPasswordAddition'; RestrictionType = 'customPasswordAddition'; UseSettingAsState = $true }
-        @{ Setting = 'keyCredentialsSymmetricKeyAddition';        RestrictionType = 'symmetricKeyAddition';   UseSettingAsState = $true }
-        @{ Setting = 'keyCredentialsMaxLifetime';                 RestrictionType = 'symmetricKeyLifetime';   UseSettingAsState = $false; FixedState = 'enabled'; Lifetime = $keyMaxLifetimeISO }
-    )
+    # Build desired password credential restrictions
+    $desiredPasswordCredentials = [System.Collections.Generic.List[object]]::new()
 
-    $desiredPasswordCredentials = @(foreach ($def in $PasswordRestrictionDefs) {
-        $rawVal = $Settings.($def.Setting)
-        $val = $rawVal.value ?? $rawVal
-        if (-not [string]::IsNullOrWhiteSpace($val) -and $val -ne 'Select a value') {
-            [ordered]@{
-                restrictionType                     = $def.RestrictionType
-                state                               = if ($def.UseSettingAsState) { $val } else { $def.FixedState }
-                maxLifetime                         = if ($def.Lifetime) { $def.Lifetime } else { $null }
-                restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
-            }
-        }
-    })
+    # Password addition + symmetric key addition (mirrors password addition)
+    if (-not [string]::IsNullOrWhiteSpace($passwordAdditionState) -and $passwordAdditionState -ne 'Select a value') {
+        $desiredPasswordCredentials.Add([ordered]@{
+            restrictionType                     = 'passwordAddition'
+            state                               = $passwordAdditionState
+            maxLifetime                         = $null
+            restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
+        })
+        $desiredPasswordCredentials.Add([ordered]@{
+            restrictionType                     = 'symmetricKeyAddition'
+            state                               = $passwordAdditionState
+            maxLifetime                         = $null
+            restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
+        })
+    }
+
+    # Custom password
+    if (-not [string]::IsNullOrWhiteSpace($customPasswordState) -and $customPasswordState -ne 'Select a value') {
+        $desiredPasswordCredentials.Add([ordered]@{
+            restrictionType                     = 'customPasswordAddition'
+            state                               = $customPasswordState
+            maxLifetime                         = $null
+            restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
+        })
+    }
+
+    # Password credential max lifetime
+    if ($passwordMaxLifetimeISO) {
+        $desiredPasswordCredentials.Add([ordered]@{
+            restrictionType                     = 'passwordLifetime'
+            state                               = 'enabled'
+            maxLifetime                         = $passwordMaxLifetimeISO
+            restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
+        })
+    }
+
+    # Symmetric key credential max lifetime
+    if ($keyMaxLifetimeISO) {
+        $desiredPasswordCredentials.Add([ordered]@{
+            restrictionType                     = 'symmetricKeyLifetime'
+            state                               = 'enabled'
+            maxLifetime                         = $keyMaxLifetimeISO
+            restrictForAppsCreatedAfterDateTime = '0001-01-01T00:00:00Z'
+        })
+    }
 
     # Key credentials (asymmetric key lifetime)
     $desiredKeyCredentials = @(
