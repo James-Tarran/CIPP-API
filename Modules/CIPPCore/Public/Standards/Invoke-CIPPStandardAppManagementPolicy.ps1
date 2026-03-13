@@ -45,9 +45,9 @@ function Invoke-CIPPStandardAppManagementPolicy {
         return
     }
 
-    # Convert user-entered days to ISO 8601 duration format (P<n>D)
-    $passwordMaxLifetimeDays = $Settings.passwordCredentialsMaxLifetime
-    $keyMaxLifetimeDays = $Settings.keyCredentialsMaxLifetime
+    # Unwrap autoComplete/number values - frontend may send {label, value} objects or plain values
+    $passwordMaxLifetimeDays = $Settings.passwordCredentialsMaxLifetime.value ?? $Settings.passwordCredentialsMaxLifetime
+    $keyMaxLifetimeDays = $Settings.keyCredentialsMaxLifetime.value ?? $Settings.keyCredentialsMaxLifetime
     $passwordMaxLifetimeISO = if (-not [string]::IsNullOrWhiteSpace($passwordMaxLifetimeDays) -and $passwordMaxLifetimeDays -ne 'Select a value') { "P${passwordMaxLifetimeDays}D" } else { $null }
     $keyMaxLifetimeISO = if (-not [string]::IsNullOrWhiteSpace($keyMaxLifetimeDays) -and $keyMaxLifetimeDays -ne 'Select a value') { "P${keyMaxLifetimeDays}D" } else { $null }
 
@@ -61,7 +61,8 @@ function Invoke-CIPPStandardAppManagementPolicy {
     )
 
     $desiredPasswordCredentials = @(foreach ($def in $PasswordRestrictionDefs) {
-        $val = $Settings.($def.Setting)
+        $rawVal = $Settings.($def.Setting)
+        $val = $rawVal.value ?? $rawVal
         if (-not [string]::IsNullOrWhiteSpace($val) -and $val -ne 'Select a value') {
             [ordered]@{
                 restrictionType                     = $def.RestrictionType
