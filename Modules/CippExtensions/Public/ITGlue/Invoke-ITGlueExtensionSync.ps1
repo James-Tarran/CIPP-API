@@ -64,7 +64,7 @@ function Invoke-ITGlueExtensionSync {
         $CompanyResult.Devices = ($Devices | Measure-Object).count
 
         # Smart auto-create for Conditional Access Policies flexible asset type
-        if ([string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and [string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
             try {
                 # Search for existing type matching "Conditional Access"
                 $AllFlexibleAssetTypes = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_asset_types' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
@@ -439,7 +439,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         # ─────────────────────────────────────────────────────────────────────
         # CONDITIONAL ACCESS POLICIES — FLEXIBLE ASSETS
         # ─────────────────────────────────────────────────────────────────────
-        if (![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies) {
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies) {
             try {
                 Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy Name' -FieldKind 'Text' -ShowInList $true -Conn $Conn
                 Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy ID' -FieldKind 'Text' -ShowInList $false -Conn $Conn
