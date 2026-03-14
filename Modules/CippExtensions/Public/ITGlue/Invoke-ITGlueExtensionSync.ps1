@@ -74,23 +74,71 @@ function Invoke-ITGlueExtensionSync {
                     $CAPTypeId = $ExistingCAPType.id
                     $CompanyResult.Logs.Add("Found existing Conditional Access flexible asset type: $($ExistingCAPType.name)")
                 } else {
-                    # Create minimal flexible asset type first
+                    # Create flexible asset type with all fields using relationships structure
                     $NewTypeBody = @{
                         data = @{
                             type       = 'flexible-asset-types'
                             attributes = @{
-                                name                    = 'Conditional Access Policy'
-                                description             = 'Microsoft 365 Conditional Access Policies synced from CIPP'
-                                icon                    = 'shield-alt'
-                                enabled                 = $true
-                                'flexible-asset-fields' = @(
-                                    @{
-                                        name           = 'Policy Name'
-                                        kind           = 'Text'
-                                        required       = $true
-                                        'show-in-list' = $true
-                                    }
-                                )
+                                name        = 'Conditional Access Policy'
+                                description = 'Microsoft 365 Conditional Access Policies synced from CIPP'
+                                icon        = 'shield-alt'
+                                enabled     = $true
+                            }
+                            relationships = @{
+                                'flexible-asset-fields' = @{
+                                    data = @(
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 1
+                                                name           = 'Policy Name'
+                                                kind           = 'Text'
+                                                required       = $true
+                                                'show-in-list' = $true
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 2
+                                                name           = 'Policy ID'
+                                                kind           = 'Text'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 3
+                                                name           = 'State'
+                                                kind           = 'Text'
+                                                required       = $false
+                                                'show-in-list' = $true
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 4
+                                                name           = 'Policy Details'
+                                                kind           = 'Textbox'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 5
+                                                name           = 'Raw JSON'
+                                                kind           = 'Textbox'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                     } | ConvertTo-Json -Depth 20 -Compress
@@ -98,12 +146,6 @@ function Invoke-ITGlueExtensionSync {
                     $NewType = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types" -Method POST -Headers $Conn.Headers -Body $NewTypeBody
                     $CAPTypeId = $NewType.data.id
                     $CompanyResult.Logs.Add("Created new Conditional Access Policy flexible asset type (ID: $CAPTypeId)")
-
-                    # Add remaining fields using the helper function
-                    Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy ID' -FieldKind 'Text' -ShowInList $false -Conn $Conn
-                    Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'State' -FieldKind 'Text' -ShowInList $true -Conn $Conn
-                    Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy Details' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
-                    Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Raw JSON' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
                 }
 
                 # Save mapping to database
