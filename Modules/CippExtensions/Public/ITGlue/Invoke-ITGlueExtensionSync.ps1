@@ -647,11 +647,9 @@ $CippMarkerEnd
                 $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
                 $ExistingNotes = $ExistingOrg.'quick-notes'
 
-                if ($ExistingNotes -and $ExistingNotes -match '\(CIPP Managed\)') {
-                    # Content-based match: use GREEDY .* to capture everything from
-                    # the first M365 Overview heading to the LAST (CIPP Managed) stamp,
-                    # removing all duplicate CIPP sections in one sweep.
-                    $QuickNotes = $ExistingNotes -replace '(?s)(<hr\s*/?>)?\s*<h3>Microsoft 365 Overview</h3>.*(CIPP Managed)</em></p>', $CippSection
+                if ($ExistingNotes -and $ExistingNotes -match [regex]::Escape($CippMarkerStart)) {
+                    # CIPP section exists - replace everything between markers using proper div tags
+                    $QuickNotes = $ExistingNotes -replace "(?s)$([regex]::Escape($CippMarkerStart)).*?$([regex]::Escape($CippMarkerEnd))", $CippSection
                 } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
                     # No previous CIPP section found - append below existing user content
                     $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
