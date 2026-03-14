@@ -486,11 +486,18 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                 foreach ($CAP in $ConditionalAccessPolicies) {
                     try {
                         # CAP data is already formatted by Invoke-ListConditionalAccessPolicies with human-readable names
+                        # Convert newline-separated strings to comma-separated for better readability
                         $StateIcon = switch ($CAP.state) {
                             'enabled' { '✓ Enabled' }
                             'disabled' { '✗ Disabled' }
                             'enabledForReportingButNotEnforced' { '⚠ Report-Only' }
                             default { $CAP.state }
+                        }
+
+                        # Helper to convert Out-String output (newline-separated) to comma-separated
+                        function Format-CAPValue($Value) {
+                            if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+                            ($Value.Trim() -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join ', '
                         }
 
                         $DetailsHtml = @"
@@ -507,18 +514,18 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 <tr><td><strong>Locations (Exclude)</strong></td><td>$($CAP.excludeLocations)</td></tr>
 <tr><td><strong>Applications (Include)</strong></td><td>$($CAP.includeApplications)</td></tr>
 <tr><td><strong>Applications (Exclude)</strong></td><td>$($CAP.excludeApplications)</td></tr>
-<tr><td><strong>User Actions</strong></td><td>$($CAP.includeUserActions)</td></tr>
-<tr><td><strong>Auth Context</strong></td><td>$($CAP.includeAuthenticationContextClassReferences)</td></tr>
+<tr><td><strong>User Actions</strong></td><td>$(Format-CAPValue $CAP.includeUserActions)</td></tr>
+<tr><td><strong>Auth Context</strong></td><td>$(Format-CAPValue $CAP.includeAuthenticationContextClassReferences)</td></tr>
 </table>
 
 <h4>Users & Groups</h4>
 <table>
-<tr><td><strong>Users (Include)</strong></td><td>$($CAP.includeUsers)</td></tr>
-<tr><td><strong>Users (Exclude)</strong></td><td>$($CAP.excludeUsers)</td></tr>
-<tr><td><strong>Groups (Include)</strong></td><td>$($CAP.includeGroups)</td></tr>
-<tr><td><strong>Groups (Exclude)</strong></td><td>$($CAP.excludeGroups)</td></tr>
-<tr><td><strong>Roles (Include)</strong></td><td>$($CAP.includeRoles)</td></tr>
-<tr><td><strong>Roles (Exclude)</strong></td><td>$($CAP.excludeRoles)</td></tr>
+<tr><td><strong>Users (Include)</strong></td><td>$(Format-CAPValue $CAP.includeUsers)</td></tr>
+<tr><td><strong>Users (Exclude)</strong></td><td>$(Format-CAPValue $CAP.excludeUsers)</td></tr>
+<tr><td><strong>Groups (Include)</strong></td><td>$(Format-CAPValue $CAP.includeGroups)</td></tr>
+<tr><td><strong>Groups (Exclude)</strong></td><td>$(Format-CAPValue $CAP.excludeGroups)</td></tr>
+<tr><td><strong>Roles (Include)</strong></td><td>$(Format-CAPValue $CAP.includeRoles)</td></tr>
+<tr><td><strong>Roles (Exclude)</strong></td><td>$(Format-CAPValue $CAP.excludeRoles)</td></tr>
 </table>
 
 <h4>Grant Controls</h4>
