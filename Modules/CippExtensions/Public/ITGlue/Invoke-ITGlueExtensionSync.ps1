@@ -58,7 +58,19 @@ function Invoke-ITGlueExtensionSync {
         $Licenses = $ExtensionCache.Licenses
         $Domains = $ExtensionCache.Domains
         $Mailboxes = $ExtensionCache.Mailboxes
-        $ConditionalAccessPolicies = $ExtensionCache.ConditionalAccess
+
+        # Get formatted CAPs with human-readable names (uses Invoke-ListConditionalAccessPolicies logic)
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId)) {
+            try {
+                $CAPResult = Invoke-ListConditionalAccessPolicies -Request @{ Query = @{ tenantFilter = $TenantFilter } }
+                $ConditionalAccessPolicies = $CAPResult.Body.Results
+            } catch {
+                $CompanyResult.Errors.Add("Failed to fetch formatted CAPs: $_")
+                $ConditionalAccessPolicies = @()
+            }
+        } else {
+            $ConditionalAccessPolicies = @()
+        }
 
         $CompanyResult.Users = ($LicensedUsers | Measure-Object).count
         $CompanyResult.Devices = ($Devices | Measure-Object).count
@@ -458,7 +470,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
         # ─────────────────────────────────────────────────────────────────────
         # CONDITIONAL ACCESS POLICIES — FLEXIBLE ASSETS
         # ─────────────────────────────────────────────────────────────────────
-        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies) {
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
             try {
                 Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy Name' -FieldKind 'Text' -ShowInList $true -Conn $Conn
                 Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy ID' -FieldKind 'Text' -ShowInList $false -Conn $Conn
@@ -473,7 +485,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 
                 foreach ($CAP in $ConditionalAccessPolicies) {
                     try {
-                        # Build HTML summary
+                        # CAP data is already formatted by Invoke-ListConditionalAccessPolicies with human-readable names
                         $StateIcon = switch ($CAP.state) {
                             'enabled' { '✓ Enabled' }
                             'disabled' { '✗ Disabled' }
