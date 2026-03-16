@@ -299,7 +299,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         $ContentToHash = "$($User.displayName)|$($User.userPrincipalName)|$($User.accountEnabled)|$M365Html"
                         $NewHash = Get-StringHash -String $ContentToHash
 
-                        $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
+                        $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.traits.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
 
                         # Check if content has changed by comparing hashes
                         $NeedsUpdate = $true
@@ -432,7 +432,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         $ContentToHash = "$($Device.deviceName)|$($Device.complianceState)|$($Device.lastSyncDateTime)|$M365DeviceHtml"
                         $NewHash = Get-StringHash -String $ContentToHash
 
-                        $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.name -eq $Device.deviceName } | Select-Object -First 1
+                        $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.traits.name -eq $Device.deviceName } | Select-Object -First 1
 
                         # Check if content has changed by comparing hashes
                         $NeedsUpdate = $true
@@ -622,7 +622,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$DetailsHtml"
                         $NewHash = Get-StringHash -String $ContentToHash
 
-                        $ExistingAsset = $ExistingCAPAssets | Where-Object { $_.'policy-id' -eq $CAP.id } | Select-Object -First 1
+                        $ExistingAsset = $ExistingCAPAssets | Where-Object { $_.traits.'policy-id' -eq $CAP.id } | Select-Object -First 1
 
                         # Check if content has changed by comparing hashes
                         $NeedsUpdate = $true
@@ -668,11 +668,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 
                 # Delete CAP assets that no longer exist in M365
                 $CurrentCAPIds = $ConditionalAccessPolicies | ForEach-Object { $_.id }
-                $OrphanedAssets = $ExistingCAPAssets | Where-Object { $_.'policy-id' -notin $CurrentCAPIds }
+                $OrphanedAssets = $ExistingCAPAssets | Where-Object { $_.traits.'policy-id' -notin $CurrentCAPIds }
                 foreach ($Orphan in $OrphanedAssets) {
                     try {
+                        $PolicyName = if ($Orphan.traits.'policy-name') { $Orphan.traits.'policy-name' } else { "ID: $($Orphan.traits.'policy-id')" }
                         $null = Invoke-ITGlueRequest -Method DELETE -Endpoint "/flexible_assets/$($Orphan.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
-                        $CompanyResult.Logs.Add("Deleted orphaned CAP: $($Orphan.'policy-name')")
+                        $CompanyResult.Logs.Add("Deleted orphaned CAP: $PolicyName")
 
                         # Remove from cache
                         $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueCAP' and RowKey eq '$($Orphan.id)'"
@@ -680,7 +681,8 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             Remove-AzDataTableEntity @ITGlueAssetCache -Entity $CachedAsset -Force
                         }
                     } catch {
-                        $CompanyResult.Errors.Add("Failed to delete orphaned CAP [$($Orphan.'policy-name')]: $_")
+                        $PolicyName = if ($Orphan.traits.'policy-name') { $Orphan.traits.'policy-name' } else { "ID: $($Orphan.traits.'policy-id')" }
+                        $CompanyResult.Errors.Add("Failed to delete orphaned CAP [$PolicyName]: $_")
                     }
                 }
 
