@@ -49,6 +49,9 @@ function Invoke-ITGlueExtensionSync {
 
         $CompanyResult.Logs.Add('Starting ITGlue Extension Sync')
 
+        # Get asset cache table for hash-based change detection
+        $ITGlueAssetCache = Get-CIPPTable -tablename 'CacheITGlueAssets'
+
         # Flatten M365 data
         $Users = $ExtensionCache.Users
         $LicensedUsers = $Users | Where-Object { $null -ne $_.assignedLicenses.skuId } | Sort-Object userPrincipalName
@@ -176,31 +179,35 @@ function Invoke-ITGlueExtensionSync {
 
         # Serial exclusion list
         $DefaultSerials = [System.Collections.Generic.List[string]]@(
-            'SystemSerialNumber', 'To Be Filled By O.E.M.', 'System Serial Number',
-            '0123456789', '123456789', 'TobefilledbyO.E.M.'
+            'SystemSerialNumber', 'System Serial Number',
+            '0123456789', '123456789'
         )
         if ($ITGlueConfig.ExcludeSerials) {
             $DefaultSerials.AddRange(($ITGlueConfig.ExcludeSerials -split ',').Trim())
         }
         $ExcludeSerials = $DefaultSerials
 
-        # ─────────────────────────────────────────────────────────────────────
         # Helper: ensure required fields exist in an ITGlue Flexible Asset Type.
-        # Uses raw Invoke-RestMethod to handle the JSON:API 'included' response.
-        # ─────────────────────────────────────────────────────────────────────
-        function Add-ITGlueFlexibleAssetField {
-            param($TypeId, $FieldName, $FieldKind = 'Textbox', $ShowInList = $false, $Conn)
+        function Add-ITGlueFlexibleAssetFields {
+            param(
+                $TypeId,
+                [array]$FieldsToAdd,  # Array of @{ Name = ''; Kind = 'Textbox'; ShowInList = $false }
+                $Conn
+            )
 
-            # GET type with its fields included
+            # GET type with its fields included (one call for all fields)
             $TypeResponse = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types/$TypeId`?include=flexible_asset_fields" -Method GET -Headers $Conn.Headers
             $IncludedFields = $TypeResponse.included | Where-Object { $_.type -eq 'flexible-asset-fields' }
             $ExistingNames = $IncludedFields | ForEach-Object { $_.attributes.name }
 
-            if ($ExistingNames -contains $FieldName) {
-                return  # Already exists, nothing to do
+            # Filter to only fields that don't exist
+            $NewFields = $FieldsToAdd | Where-Object { $_.Name -notin $ExistingNames }
+
+            if ($NewFields.Count -eq 0) {
+                return  # All fields already exist
             }
 
-            # Build complete field list: existing (with IDs) + new field
+            # Build complete field list: existing (with IDs) + new fields
             $AllFields = [System.Collections.Generic.List[object]]::new()
             foreach ($F in $IncludedFields) {
                 $AllFields.Add([ordered]@{
@@ -212,12 +219,15 @@ function Invoke-ITGlueExtensionSync {
                     position       = $F.attributes.position
                 })
             }
-            $AllFields.Add([ordered]@{
-                name           = $FieldName
-                kind           = $FieldKind
-                required       = $false
-                'show-in-list' = $ShowInList
-            })
+
+            foreach ($NewField in $NewFields) {
+                $AllFields.Add([ordered]@{
+                    name           = $NewField.Name
+                    kind           = $NewField.Kind
+                    required       = $false
+                    'show-in-list' = $NewField.ShowInList
+                })
+            }
 
             $PatchBody = @{
                 data = @{
@@ -232,18 +242,29 @@ function Invoke-ITGlueExtensionSync {
             $null = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types/$TypeId" -Method PATCH -Headers $Conn.Headers -Body $PatchBody
         }
 
-        # ─────────────────────────────────────────────────────────────────────
+        # Helper: Convert Out-String output (newline-separated) to comma-separated
+        # Used for formatting CAP values from Invoke-ListConditionalAccessPolicies
+        function Format-CAPValue($Value) {
+            if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+            ($Value.Trim() -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join ', '
+        }
+
         # USERS — FLEXIBLE ASSETS
-        # ─────────────────────────────────────────────────────────────────────
         if (![string]::IsNullOrEmpty($PeopleTypeId)) {
             try {
-                Add-ITGlueFlexibleAssetField -TypeId $PeopleTypeId -FieldName 'Email Address' -FieldKind 'Text' -ShowInList $true -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $PeopleTypeId -FieldName 'Microsoft 365'  -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
+                # Batch field additions into single API call
+                Add-ITGlueFlexibleAssetFields -TypeId $PeopleTypeId -FieldsToAdd @(
+                    @{ Name = 'Email Address'; Kind = 'Text'; ShowInList = $true }
+                    @{ Name = 'Microsoft 365'; Kind = 'Textbox'; ShowInList = $false }
+                ) -Conn $Conn
 
                 $ExistingPeopleAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
                     'filter[flexible_asset_type_id]' = $PeopleTypeId
                     'filter[organization_id]'        = $OrgId
                 }
+
+                $UserUpdatedCount = 0
+                $UserSkippedCount = 0
 
                 foreach ($User in $LicensedUsers) {
                     try {
@@ -274,34 +295,61 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'microsoft-365' = $M365Html
                         }
 
+                        # Hash-based change detection - only update if content changed
+                        $ContentToHash = "$($User.displayName)|$($User.userPrincipalName)|$($User.accountEnabled)|$M365Html"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
                         $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
 
-                        $AssetAttribs = @{
-                            'organization-id'        = $OrgId
-                            'flexible-asset-type-id' = $PeopleTypeId
-                            traits                   = $Traits
+                        # Check if content has changed by comparing hashes
+                        $NeedsUpdate = $true
+                        if ($ExistingAsset) {
+                            $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueUser' and RowKey eq '$($ExistingAsset.id)'"
+                            if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
+                                $NeedsUpdate = $false
+                                $UserSkippedCount++
+                            }
                         }
 
-                        if ($ExistingAsset) {
-                            $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
-                        } else {
-                            $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                        if ($NeedsUpdate) {
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $PeopleTypeId
+                                traits                   = $Traits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                                $AssetId = $ExistingAsset.id
+                            } else {
+                                $CreatedAsset = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                                $AssetId = $CreatedAsset[0].id
+                            }
+
+                            # Cache the hash to avoid unnecessary updates on next sync
+                            $CacheEntry = @{
+                                PartitionKey = 'ITGlueUser'
+                                RowKey       = [string]$AssetId
+                                OrgId        = [string]$OrgId
+                                UserUPN      = $User.userPrincipalName
+                                Hash         = $NewHash
+                            }
+                            Add-CIPPAzDataTableEntity @ITGlueAssetCache -Entity $CacheEntry -Force
+
+                            $UserUpdatedCount++
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("User FA [$($User.userPrincipalName)]: $_")
                     }
                 }
 
-                $CompanyResult.Logs.Add("Users Flexible Assets: Processed $($LicensedUsers.Count) users")
+                $CompanyResult.Logs.Add("Users Flexible Assets: $UserUpdatedCount updated, $UserSkippedCount unchanged")
             } catch {
                 $CompanyResult.Errors.Add("Users Flexible Assets block failed: $_")
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # USERS — NATIVE CONTACTS
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.CreateMissingContacts -eq $true) {
             try {
                 $ExistingContacts = Invoke-ITGlueRequest -Method GET -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
@@ -328,7 +376,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'contacts' -Attributes $ContactAttribs
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Contact [$($User.userPrincipalName)]: $_")
                     }
@@ -340,12 +387,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # DEVICES — FLEXIBLE ASSETS
-        # ─────────────────────────────────────────────────────────────────────
         if (![string]::IsNullOrEmpty($DeviceTypeId)) {
             try {
-                Add-ITGlueFlexibleAssetField -TypeId $DeviceTypeId -FieldName 'Microsoft 365' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
+                Add-ITGlueFlexibleAssetFields -TypeId $DeviceTypeId -FieldsToAdd @(
+                    @{ Name = 'Microsoft 365'; Kind = 'Textbox'; ShowInList = $false }
+                ) -Conn $Conn
 
                 $ExistingDeviceAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
                     'filter[flexible_asset_type_id]' = $DeviceTypeId
@@ -357,6 +404,9 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     ![string]::IsNullOrWhiteSpace($_.serialNumber) -and
                     $_.managedDeviceOwnerType -eq 'company'
                 }
+
+                $DeviceUpdatedCount = 0
+                $DeviceSkippedCount = 0
 
                 foreach ($Device in $SyncDevices) {
                     try {
@@ -378,37 +428,64 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'microsoft-365' = $M365DeviceHtml
                         }
 
+                        # Hash-based change detection - only update if content changed
+                        $ContentToHash = "$($Device.deviceName)|$($Device.complianceState)|$($Device.lastSyncDateTime)|$M365DeviceHtml"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
                         $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.name -eq $Device.deviceName } | Select-Object -First 1
 
-                        $AssetAttribs = @{
-                            'organization-id'        = $OrgId
-                            'flexible-asset-type-id' = $DeviceTypeId
-                            traits                   = $DeviceTraits
+                        # Check if content has changed by comparing hashes
+                        $NeedsUpdate = $true
+                        if ($ExistingAsset) {
+                            $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueDevice' and RowKey eq '$($ExistingAsset.id)'"
+                            if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
+                                $NeedsUpdate = $false
+                                $DeviceSkippedCount++
+                            }
                         }
 
-                        if ($ExistingAsset) {
-                            $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
-                        } else {
-                            $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                        if ($NeedsUpdate) {
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $DeviceTypeId
+                                traits                   = $DeviceTraits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                                $AssetId = $ExistingAsset.id
+                            } else {
+                                $CreatedAsset = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                                $AssetId = $CreatedAsset[0].id
+                            }
+
+                            # Cache the hash to avoid unnecessary updates on next sync
+                            $CacheEntry = @{
+                                PartitionKey = 'ITGlueDevice'
+                                RowKey       = [string]$AssetId
+                                OrgId        = [string]$OrgId
+                                DeviceName   = $Device.deviceName
+                                Hash         = $NewHash
+                            }
+                            Add-CIPPAzDataTableEntity @ITGlueAssetCache -Entity $CacheEntry -Force
+
+                            $DeviceUpdatedCount++
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Device FA [$($Device.deviceName)]: $_")
                     }
                 }
 
-                $CompanyResult.Logs.Add("Device Flexible Assets: Processed $($SyncDevices.Count) devices")
+                $CompanyResult.Logs.Add("Device Flexible Assets: $DeviceUpdatedCount updated, $DeviceSkippedCount unchanged")
             } catch {
                 $CompanyResult.Errors.Add("Device Flexible Assets block failed: $_")
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # DEVICES — NATIVE CONFIGURATIONS
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.CreateMissingConfigurations -eq $true) {
             try {
-                # Cache configuration types for the whole sync run (one API call)
+                # Cache configuration types for the whole sync run
                 $ConfigTypes = Invoke-ITGlueRequest -Method GET -Endpoint '/configuration_types' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
 
                 $ExistingConfigs = Invoke-ITGlueRequest -Method GET -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
@@ -455,7 +532,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'configurations' -Attributes $ConfigAttribs
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Config [$($Device.deviceName)]: $_")
                     }
@@ -467,21 +543,24 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # CONDITIONAL ACCESS POLICIES — FLEXIBLE ASSETS
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
             try {
-                Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy Name' -FieldKind 'Text' -ShowInList $true -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy ID' -FieldKind 'Text' -ShowInList $false -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'State' -FieldKind 'Text' -ShowInList $true -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Policy Details' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $CAPTypeId -FieldName 'Raw JSON' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
+                Add-ITGlueFlexibleAssetFields -TypeId $CAPTypeId -FieldsToAdd @(
+                    @{ Name = 'Policy Name'; Kind = 'Text'; ShowInList = $true }
+                    @{ Name = 'Policy ID'; Kind = 'Text'; ShowInList = $false }
+                    @{ Name = 'State'; Kind = 'Text'; ShowInList = $true }
+                    @{ Name = 'Policy Details'; Kind = 'Textbox'; ShowInList = $false }
+                    @{ Name = 'Raw JSON'; Kind = 'Textbox'; ShowInList = $false }
+                ) -Conn $Conn
 
                 $ExistingCAPAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
                     'filter[flexible_asset_type_id]' = $CAPTypeId
                     'filter[organization_id]'        = $OrgId
                 }
+
+                $UpdatedCount = 0
+                $SkippedCount = 0
 
                 foreach ($CAP in $ConditionalAccessPolicies) {
                     try {
@@ -490,12 +569,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'disabled' { '✗ Disabled' }
                             'enabledForReportingButNotEnforced' { '⚠ Report-Only' }
                             default { $CAP.state }
-                        }
-
-                        # Helper to convert Out-String output (newline-separated) to comma-separated
-                        function Format-CAPValue($Value) {
-                            if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
-                            ($Value.Trim() -split "`n" | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() }) -join ', '
                         }
 
                         $DetailsHtml = @"
@@ -545,20 +618,49 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'raw-json'       = $CAP.rawjson
                         }
 
+                        # Hash-based change detection - only update if content changed
+                        $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$DetailsHtml"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
                         $ExistingAsset = $ExistingCAPAssets | Where-Object { $_.'policy-id' -eq $CAP.id } | Select-Object -First 1
 
-                        $AssetAttribs = @{
-                            'organization-id'        = $OrgId
-                            'flexible-asset-type-id' = $CAPTypeId
-                            traits                   = $CAPTraits
+                        # Check if content has changed by comparing hashes
+                        $NeedsUpdate = $true
+                        if ($ExistingAsset) {
+                            $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueCAP' and RowKey eq '$($ExistingAsset.id)'"
+                            if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
+                                $NeedsUpdate = $false
+                                $SkippedCount++
+                            }
                         }
 
-                        if ($ExistingAsset) {
-                            $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
-                        } else {
-                            $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                        if ($NeedsUpdate) {
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $CAPTypeId
+                                traits                   = $CAPTraits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                                $AssetId = $ExistingAsset.id
+                            } else {
+                                $CreatedAsset = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                                $AssetId = $CreatedAsset[0].id
+                            }
+
+                            # Cache the hash to avoid unnecessary updates on next sync
+                            $CacheEntry = @{
+                                PartitionKey = 'ITGlueCAP'
+                                RowKey       = [string]$AssetId
+                                OrgId        = [string]$OrgId
+                                PolicyId     = $CAP.id
+                                Hash         = $NewHash
+                            }
+                            Add-CIPPAzDataTableEntity @ITGlueAssetCache -Entity $CacheEntry -Force
+
+                            $UpdatedCount++
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("CAP FA [$($CAP.displayName)]: $_")
                     }
@@ -571,20 +673,24 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     try {
                         $null = Invoke-ITGlueRequest -Method DELETE -Endpoint "/flexible_assets/$($Orphan.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
                         $CompanyResult.Logs.Add("Deleted orphaned CAP: $($Orphan.'policy-name')")
+
+                        # Remove from cache
+                        $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueCAP' and RowKey eq '$($Orphan.id)'"
+                        if ($CachedAsset) {
+                            Remove-AzDataTableEntity @ITGlueAssetCache -Entity $CachedAsset -Force
+                        }
                     } catch {
                         $CompanyResult.Errors.Add("Failed to delete orphaned CAP [$($Orphan.'policy-name')]: $_")
                     }
                 }
 
-                $CompanyResult.Logs.Add("Conditional Access Policies: Processed $($ConditionalAccessPolicies.Count) policies")
+                $CompanyResult.Logs.Add("Conditional Access Policies: $UpdatedCount updated, $SkippedCount unchanged")
             } catch {
                 $CompanyResult.Errors.Add("Conditional Access Policies block failed: $_")
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # M365 OVERVIEW — update organisation quick-notes (preserving existing content)
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
                 $VerifiedDomainList = ($Domains | Where-Object { $_.isVerified -eq $true }).id
