@@ -577,8 +577,36 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             default { $CAP.state }
                         }
 
-                        # Build HTML WITHOUT timestamp first (for hash calculation)
-                        $DetailsHtmlCore = @"
+                        # Build content for hash - ONLY actual policy settings (exclude dates/timestamps)
+                        $ContentForHash = @"
+State: $StateIcon
+Client App Types: $($CAP.clientAppTypes)
+Platforms (Include): $($CAP.includePlatforms)
+Platforms (Exclude): $($CAP.excludePlatforms)
+Locations (Include): $($CAP.includeLocations)
+Locations (Exclude): $($CAP.excludeLocations)
+Applications (Include): $($CAP.includeApplications)
+Applications (Exclude): $($CAP.excludeApplications)
+User Actions: $(Format-CAPValue $CAP.includeUserActions)
+Auth Context: $(Format-CAPValue $CAP.includeAuthenticationContextClassReferences)
+Users (Include): $(Format-CAPValue $CAP.includeUsers)
+Users (Exclude): $(Format-CAPValue $CAP.excludeUsers)
+Groups (Include): $(Format-CAPValue $CAP.includeGroups)
+Groups (Exclude): $(Format-CAPValue $CAP.excludeGroups)
+Roles (Include): $(Format-CAPValue $CAP.includeRoles)
+Roles (Exclude): $(Format-CAPValue $CAP.excludeRoles)
+Operator: $($CAP.grantControlsOperator)
+Built-in Controls: $($CAP.builtInControls)
+Custom Auth Factors: $($CAP.customAuthenticationFactors)
+Terms of Use: $($CAP.termsOfUse)
+"@
+
+                        # Hash-based change detection - hash ONLY policy content (not dates or display timestamps)
+                        $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$ContentForHash"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Build full HTML with dates for display (dates NOT in hash)
+                        $DetailsHtml = @"
 <h4>State: $StateIcon</h4>
 <p><strong>Created:</strong> $($CAP.createdDateTime)<br/>
 <strong>Modified:</strong> $($CAP.modifiedDateTime)</p>
@@ -613,14 +641,9 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 <tr><td><strong>Custom Auth Factors</strong></td><td>$($CAP.customAuthenticationFactors)</td></tr>
 <tr><td><strong>Terms of Use</strong></td><td>$($CAP.termsOfUse)</td></tr>
 </table>
+
+<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
-
-                        # Hash-based change detection - hash content WITHOUT timestamp
-                        $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$DetailsHtmlCore"
-                        $NewHash = Get-StringHash -String $ContentToHash
-
-                        # Add timestamp AFTER hashing (for display only)
-                        $DetailsHtml = $DetailsHtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $CAPTraits = @{
                             'policy-name'    = $CAP.displayName
@@ -639,6 +662,13 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
                                 $NeedsUpdate = $false
                                 $SkippedCount++
+                            } else {
+                                # Debug: Log why hash changed
+                                if ($CachedAsset) {
+                                    Write-LogMessage -API 'ITGlueSync' -tenant $TenantFilter -message "CAP hash mismatch for $($CAP.displayName): Cached=$($CachedAsset.Hash.Substring(0,8))... New=$($NewHash.Substring(0,8))..." -sev Debug
+                                } else {
+                                    Write-LogMessage -API 'ITGlueSync' -tenant $TenantFilter -message "CAP no cache found for $($CAP.displayName) (AssetID: $($ExistingAsset.id))" -sev Debug
+                                }
                             }
                         }
 
