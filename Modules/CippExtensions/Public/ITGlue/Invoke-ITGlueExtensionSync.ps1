@@ -485,8 +485,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 
                 foreach ($CAP in $ConditionalAccessPolicies) {
                     try {
-                        # CAP data is already formatted by Invoke-ListConditionalAccessPolicies with human-readable names
-                        # Convert newline-separated strings to comma-separated for better readability
                         $StateIcon = switch ($CAP.state) {
                             'enabled' { '✓ Enabled' }
                             'disabled' { '✗ Disabled' }
@@ -611,8 +609,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                 }
 
                 # CIPP managed section wrapped in a <div> with a class attribute.
-                # HTML comments (<!-- -->) are stripped by ITGlue's sanitizer, so we
-                # use a real element as our marker instead.
+                # HTML comments (<!-- -->) are stripped by ITGlue's sanitizer, so we use a real element as our marker instead.
                 $CippMarkerStart = '<div class="cipp-managed">'
                 $CippMarkerEnd = '</div>'
 
@@ -647,9 +644,17 @@ $CippMarkerEnd
                 $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
                 $ExistingNotes = $ExistingOrg.'quick-notes'
 
-                if ($ExistingNotes -and $ExistingNotes -match [regex]::Escape($CippMarkerStart)) {
-                    # CIPP section exists - replace everything between markers using proper div tags
-                    $QuickNotes = $ExistingNotes -replace "(?s)$([regex]::Escape($CippMarkerStart)).*?$([regex]::Escape($CippMarkerEnd))", $CippSection
+                # ITGlue reformats HTML, so use flexible regex that handles whitespace variations
+                if ($ExistingNotes -and $ExistingNotes -match '<div\s+class="cipp-managed">') {
+                    # CIPP section exists - replace ALL occurrences (handles duplicates from failed previous syncs)
+                    # Use non-capturing group and match any whitespace after opening tag
+                    $QuickNotes = $ExistingNotes -replace '(?s)<div\s+class="cipp-managed">.*?</div>\s*', ''
+                    # Append fresh CIPP section to cleaned notes
+                    if ($QuickNotes.Trim()) {
+                        $QuickNotes = $QuickNotes.TrimEnd() + "`n`n" + $CippSection
+                    } else {
+                        $QuickNotes = $CippSection -replace '<hr/>\s*', ''
+                    }
                 } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
                     # No previous CIPP section found - append below existing user content
                     $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
