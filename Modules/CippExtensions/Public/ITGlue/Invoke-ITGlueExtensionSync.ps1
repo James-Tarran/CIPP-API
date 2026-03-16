@@ -276,7 +276,8 @@ function Invoke-ITGlueExtensionSync {
                         $UserRoles  = ($AllRoles  | Where-Object { $_.members.userPrincipalName -contains $User.userPrincipalName }).displayName -join ', '
                         $Mailbox    = $Mailboxes | Where-Object { $_.UPN -eq $User.userPrincipalName } | Select-Object -First 1
 
-                        $M365Html = @"
+                        # Build HTML WITHOUT timestamp first (for hash calculation)
+                        $M365HtmlCore = @"
 <p><strong>Licenses:</strong> $($UserLicenseNames -join ', ')</p>
 <p><strong>Groups:</strong> $(if ($UserGroups) { $UserGroups } else { 'None' })</p>
 <p><strong>Admin Roles:</strong> $(if ($UserRoles) { $UserRoles } else { 'None' })</p>
@@ -286,18 +287,20 @@ function Invoke-ITGlueExtensionSync {
 $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</p>" })
 <p><a href="$CIPPURL/identity/administration/users?customerId=$($Tenant.customerId)" target="_blank">View in CIPP</a> &nbsp;
 <a href="https://entra.microsoft.com/$($Tenant.defaultDomainName)/#view/Microsoft_AAD_UsersAndTenants/UserProfileMenuBlade/~/overview/userId/$($User.id)" target="_blank">View in Entra</a></p>
-<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
+
+                        # Hash-based change detection - hash content WITHOUT timestamp
+                        $ContentToHash = "$($User.displayName)|$($User.userPrincipalName)|$($User.accountEnabled)|$M365HtmlCore"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Add timestamp AFTER hashing (for display only)
+                        $M365Html = $M365HtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $Traits = @{
                             'name'          = $User.displayName
                             'email-address' = $User.userPrincipalName
                             'microsoft-365' = $M365Html
                         }
-
-                        # Hash-based change detection - only update if content changed
-                        $ContentToHash = "$($User.displayName)|$($User.userPrincipalName)|$($User.accountEnabled)|$M365Html"
-                        $NewHash = Get-StringHash -String $ContentToHash
 
                         $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.traits.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
 
@@ -410,7 +413,8 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 
                 foreach ($Device in $SyncDevices) {
                     try {
-                        $M365DeviceHtml = @"
+                        # Build HTML WITHOUT timestamp first (for hash calculation)
+                        $M365DeviceHtmlCore = @"
 <p><strong>Serial:</strong> $($Device.serialNumber)</p>
 <p><strong>OS:</strong> $($Device.operatingSystem) $($Device.osVersion)</p>
 <p><strong>Manufacturer / Model:</strong> $($Device.manufacturer) $($Device.model)</p>
@@ -420,17 +424,19 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 <p><strong>Primary User:</strong> $($Device.userDisplayName) ($($Device.userPrincipalName))</p>
 <p><a href="$CIPPURL/endpoint/reports/devices?customerId=$($Tenant.customerId)" target="_blank">View in CIPP</a> &nbsp;
 <a href="https://intune.microsoft.com/$($Tenant.defaultDomainName)/" target="_blank">Open Intune</a></p>
-<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
+
+                        # Hash-based change detection - hash content WITHOUT timestamp
+                        $ContentToHash = "$($Device.deviceName)|$($Device.complianceState)|$($Device.lastSyncDateTime)|$M365DeviceHtmlCore"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Add timestamp AFTER hashing (for display only)
+                        $M365DeviceHtml = $M365DeviceHtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $DeviceTraits = @{
                             'name'          = $Device.deviceName
                             'microsoft-365' = $M365DeviceHtml
                         }
-
-                        # Hash-based change detection - only update if content changed
-                        $ContentToHash = "$($Device.deviceName)|$($Device.complianceState)|$($Device.lastSyncDateTime)|$M365DeviceHtml"
-                        $NewHash = Get-StringHash -String $ContentToHash
 
                         $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.traits.name -eq $Device.deviceName } | Select-Object -First 1
 
@@ -571,7 +577,8 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             default { $CAP.state }
                         }
 
-                        $DetailsHtml = @"
+                        # Build HTML WITHOUT timestamp first (for hash calculation)
+                        $DetailsHtmlCore = @"
 <h4>State: $StateIcon</h4>
 <p><strong>Created:</strong> $($CAP.createdDateTime)<br/>
 <strong>Modified:</strong> $($CAP.modifiedDateTime)</p>
@@ -606,9 +613,14 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 <tr><td><strong>Custom Auth Factors</strong></td><td>$($CAP.customAuthenticationFactors)</td></tr>
 <tr><td><strong>Terms of Use</strong></td><td>$($CAP.termsOfUse)</td></tr>
 </table>
-
-<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
+
+                        # Hash-based change detection - hash content WITHOUT timestamp
+                        $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$DetailsHtmlCore"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Add timestamp AFTER hashing (for display only)
+                        $DetailsHtml = $DetailsHtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $CAPTraits = @{
                             'policy-name'    = $CAP.displayName
@@ -617,10 +629,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'policy-details' = $DetailsHtml
                             'raw-json'       = $CAP.rawjson
                         }
-
-                        # Hash-based change detection - only update if content changed
-                        $ContentToHash = "$($CAP.displayName)|$($CAP.state)|$DetailsHtml"
-                        $NewHash = Get-StringHash -String $ContentToHash
 
                         $ExistingAsset = $ExistingCAPAssets | Where-Object { $_.traits.'policy-id' -eq $CAP.id } | Select-Object -First 1
 
