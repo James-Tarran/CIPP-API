@@ -114,7 +114,7 @@ Function Invoke-ExecExtensionMapping {
             Batch            = @($Batch)
           }
           #Write-Host ($InputObject | ConvertTo-Json)
-          $InstanceId = Start-NewOrchestration -FunctionName 'CIPPOrchestrator' -InputObject ($InputObject | ConvertTo-Json -Depth 5 -Compress)
+          $InstanceId = Start-CIPPOrchestrator -InputObject $InputObject
           Write-Host "Started permissions orchestration with ID = '$InstanceId'"
           $Result = 'AutoMapping Request has been queued. Exact name matches will appear first and matches on device names and serials will take longer. Please check the CIPP Logbook and refresh the page once complete.'
         }
@@ -126,6 +126,23 @@ Function Invoke-ExecExtensionMapping {
   catch {
     $ErrorMessage = Get-CippException -Exception $_
     $Result = "Mapping API failed. $($ErrorMessage.NormalizedError)"
+    Write-LogMessage -API $APIName -headers $Headers -message $Result -Sev 'Error' -LogData $ErrorMessage
+    $StatusCode = [HttpStatusCode]::InternalServerError
+  }
+
+  try {
+    if ($Request.Query.CreateCAType) {
+      switch ($Request.Query.CreateCAType) {
+        'ITGlue' {
+          $Result = New-ITGlueCAPolicyAssetType
+        }
+      }
+    }
+    $StatusCode = [HttpStatusCode]::OK
+  }
+  catch {
+    $ErrorMessage = Get-CippException -Exception $_
+    $Result = "Create CA Type API failed. $($ErrorMessage.NormalizedError)"
     Write-LogMessage -API $APIName -headers $Headers -message $Result -Sev 'Error' -LogData $ErrorMessage
     $StatusCode = [HttpStatusCode]::InternalServerError
   }
