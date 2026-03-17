@@ -29,6 +29,11 @@ function Get-ITGlueFieldMapping {
             FieldLabel = 'Flexible Asset Type for M365 Devices'
             FieldType  = 'FlexibleAssetTypes'
         }
+        [PSCustomObject]@{
+            FieldName  = 'ConditionalAccessPolicies'
+            FieldLabel = 'Flexible Asset Type for M365 Conditional Access Policies'
+            FieldType  = 'FlexibleAssetTypes'
+        }
     )
 
     $Table = Get-CIPPTable -TableName Extensionsconfig

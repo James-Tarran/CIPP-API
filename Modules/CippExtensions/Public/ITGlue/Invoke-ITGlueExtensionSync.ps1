@@ -33,6 +33,7 @@ function Invoke-ITGlueExtensionSync {
         $OrgId = $TenantMap.IntegrationId
         $PeopleTypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'Users' }).IntegrationId
         $DeviceTypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'Devices' }).IntegrationId
+        $CAPTypeId = ($Mappings | Where-Object { $_.PartitionKey -eq 'ITGlueFieldMapping' -and $_.RowKey -eq 'ConditionalAccessPolicies' }).IntegrationId
 
         # Get M365 cached data
         $ExtensionCache = Get-CippExtensionReportingData -TenantFilter $Tenant.defaultDomainName -IncludeMailboxes
@@ -48,6 +49,9 @@ function Invoke-ITGlueExtensionSync {
 
         $CompanyResult.Logs.Add('Starting ITGlue Extension Sync')
 
+        # Get asset cache table for hash-based change detection
+        $ITGlueAssetCache = Get-CIPPTable -tablename 'CacheITGlueAssets'
+
         # Flatten M365 data
         $Users = $ExtensionCache.Users
         $LicensedUsers = $Users | Where-Object { $null -ne $_.assignedLicenses.skuId } | Sort-Object userPrincipalName
@@ -58,79 +62,147 @@ function Invoke-ITGlueExtensionSync {
         $Domains = $ExtensionCache.Domains
         $Mailboxes = $ExtensionCache.Mailboxes
 
+        # Get formatted CAPs
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId)) {
+            try {
+                $CAPResult = Invoke-ListConditionalAccessPolicies -Request @{ Query = @{ tenantFilter = $TenantFilter } }
+                $ConditionalAccessPolicies = $CAPResult.Body.Results
+            } catch {
+                $CompanyResult.Errors.Add("Failed to fetch formatted CAPs: $_")
+                $ConditionalAccessPolicies = @()
+            }
+        } else {
+            $ConditionalAccessPolicies = @()
+        }
+
         $CompanyResult.Users = ($LicensedUsers | Measure-Object).count
         $CompanyResult.Devices = ($Devices | Measure-Object).count
 
+        # Smart auto-create for Conditional Access Policies flexible asset type
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and [string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
+            try {
+                # Search for existing type matching "Conditional Access"
+                $AllFlexibleAssetTypes = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_asset_types' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
+                $ExistingCAPType = $AllFlexibleAssetTypes | Where-Object { $_.name -like '*Conditional Access*' } | Select-Object -First 1
+
+                if ($ExistingCAPType) {
+                    $CAPTypeId = $ExistingCAPType.id
+                    $CompanyResult.Logs.Add("Found existing Conditional Access flexible asset type: $($ExistingCAPType.name)")
+                } else {
+                    # Create flexible asset type with all fields using relationships structure
+                    $NewTypeBody = @{
+                        data = @{
+                            type       = 'flexible-asset-types'
+                            attributes = @{
+                                name        = 'Conditional Access Policy'
+                                description = 'Microsoft 365 Conditional Access Policies synced from CIPP'
+                                icon        = 'shield-alt'
+                                enabled     = $true
+                            }
+                            relationships = @{
+                                'flexible-asset-fields' = @{
+                                    data = @(
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 1
+                                                name           = 'Policy Name'
+                                                kind           = 'Text'
+                                                required       = $true
+                                                'show-in-list' = $true
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 2
+                                                name           = 'Policy ID'
+                                                kind           = 'Text'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 3
+                                                name           = 'State'
+                                                kind           = 'Text'
+                                                required       = $false
+                                                'show-in-list' = $true
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 4
+                                                name           = 'Policy Details'
+                                                kind           = 'Textbox'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                        @{
+                                            type       = 'flexible-asset-fields'
+                                            attributes = @{
+                                                order          = 5
+                                                name           = 'Raw JSON'
+                                                kind           = 'Textbox'
+                                                required       = $false
+                                                'show-in-list' = $false
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    } | ConvertTo-Json -Depth 20 -Compress
+
+                    $NewType = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types" -Method POST -Headers $Conn.Headers -Body $NewTypeBody
+                    $CAPTypeId = $NewType.data.id
+                    $CompanyResult.Logs.Add("Created new Conditional Access Policy flexible asset type (ID: $CAPTypeId)")
+                }
+
+                # Save mapping to database
+                $AddMapping = @{
+                    PartitionKey    = 'ITGlueFieldMapping'
+                    RowKey          = 'ConditionalAccessPolicies'
+                    IntegrationId   = "$CAPTypeId"
+                    IntegrationName = 'Conditional Access Policy'
+                }
+                Add-CIPPAzDataTableEntity @MappingTable -Entity $AddMapping -Force
+                $CompanyResult.Logs.Add("Saved Conditional Access Policy mapping (ID: $CAPTypeId)")
+            } catch {
+                $CompanyResult.Errors.Add("Failed to auto-create CAP flexible asset type: $_")
+            }
+        }
+
         # Serial exclusion list
         $DefaultSerials = [System.Collections.Generic.List[string]]@(
-            'SystemSerialNumber', 'To Be Filled By O.E.M.', 'System Serial Number',
-            '0123456789', '123456789', 'TobefilledbyO.E.M.'
+            'SystemSerialNumber', 'System Serial Number',
+            '0123456789', '123456789'
         )
         if ($ITGlueConfig.ExcludeSerials) {
             $DefaultSerials.AddRange(($ITGlueConfig.ExcludeSerials -split ',').Trim())
         }
         $ExcludeSerials = $DefaultSerials
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Helper: ensure required fields exist in an ITGlue Flexible Asset Type.
-        # Uses raw Invoke-RestMethod to handle the JSON:API 'included' response.
-        # ─────────────────────────────────────────────────────────────────────
-        function Add-ITGlueFlexibleAssetField {
-            param($TypeId, $FieldName, $FieldKind = 'Textbox', $ShowInList = $false, $Conn)
-
-            # GET type with its fields included
-            $TypeResponse = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types/$TypeId`?include=flexible_asset_fields" -Method GET -Headers $Conn.Headers
-            $IncludedFields = $TypeResponse.included | Where-Object { $_.type -eq 'flexible-asset-fields' }
-            $ExistingNames = $IncludedFields | ForEach-Object { $_.attributes.name }
-
-            if ($ExistingNames -contains $FieldName) {
-                return  # Already exists, nothing to do
-            }
-
-            # Build complete field list: existing (with IDs) + new field
-            $AllFields = [System.Collections.Generic.List[object]]::new()
-            foreach ($F in $IncludedFields) {
-                $AllFields.Add([ordered]@{
-                    id             = $F.id
-                    name           = $F.attributes.name
-                    kind           = $F.attributes.kind
-                    required       = $F.attributes.required
-                    'show-in-list' = $F.attributes.'show-in-list'
-                    position       = $F.attributes.position
-                })
-            }
-            $AllFields.Add([ordered]@{
-                name           = $FieldName
-                kind           = $FieldKind
-                required       = $false
-                'show-in-list' = $ShowInList
-            })
-
-            $PatchBody = @{
-                data = @{
-                    type       = 'flexible-asset-types'
-                    id         = $TypeId
-                    attributes = @{
-                        'flexible-asset-fields' = @($AllFields)
-                    }
-                }
-            } | ConvertTo-Json -Depth 20 -Compress
-
-            $null = Invoke-RestMethod -Uri "$($Conn.BaseUrl)/flexible_asset_types/$TypeId" -Method PATCH -Headers $Conn.Headers -Body $PatchBody
-        }
-
-        # ─────────────────────────────────────────────────────────────────────
         # USERS — FLEXIBLE ASSETS
-        # ─────────────────────────────────────────────────────────────────────
         if (![string]::IsNullOrEmpty($PeopleTypeId)) {
             try {
-                Add-ITGlueFlexibleAssetField -TypeId $PeopleTypeId -FieldName 'Email Address' -FieldKind 'Text' -ShowInList $true -Conn $Conn
-                Add-ITGlueFlexibleAssetField -TypeId $PeopleTypeId -FieldName 'Microsoft 365'  -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
+                # Batch field additions into single API call
+                Add-ITGlueFlexibleAssetFields -TypeId $PeopleTypeId -FieldsToAdd @(
+                    @{ Name = 'Email Address'; Kind = 'Text'; ShowInList = $true }
+                    @{ Name = 'Microsoft 365'; Kind = 'Textbox'; ShowInList = $false }
+                ) -Conn $Conn
 
                 $ExistingPeopleAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
                     'filter[flexible_asset_type_id]' = $PeopleTypeId
                     'filter[organization_id]'        = $OrgId
                 }
+
+                $UserUpdatedCount = 0
+                $UserSkippedCount = 0
 
                 foreach ($User in $LicensedUsers) {
                     try {
@@ -142,7 +214,8 @@ function Invoke-ITGlueExtensionSync {
                         $UserRoles  = ($AllRoles  | Where-Object { $_.members.userPrincipalName -contains $User.userPrincipalName }).displayName -join ', '
                         $Mailbox    = $Mailboxes | Where-Object { $_.UPN -eq $User.userPrincipalName } | Select-Object -First 1
 
-                        $M365Html = @"
+                        # Build HTML WITHOUT timestamp first (for hash calculation)
+                        $M365HtmlCore = @"
 <p><strong>Licenses:</strong> $($UserLicenseNames -join ', ')</p>
 <p><strong>Groups:</strong> $(if ($UserGroups) { $UserGroups } else { 'None' })</p>
 <p><strong>Admin Roles:</strong> $(if ($UserRoles) { $UserRoles } else { 'None' })</p>
@@ -152,8 +225,14 @@ function Invoke-ITGlueExtensionSync {
 $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</p>" })
 <p><a href="$CIPPURL/identity/administration/users?customerId=$($Tenant.customerId)" target="_blank">View in CIPP</a> &nbsp;
 <a href="https://entra.microsoft.com/$($Tenant.defaultDomainName)/#view/Microsoft_AAD_UsersAndTenants/UserProfileMenuBlade/~/overview/userId/$($User.id)" target="_blank">View in Entra</a></p>
-<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
+
+                        # Hash-based change detection - hash content WITHOUT timestamp
+                        $ContentToHash = "$($User.displayName)|$($User.userPrincipalName)|$($User.accountEnabled)|$M365HtmlCore"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Add timestamp AFTER hashing (for display only)
+                        $M365Html = $M365HtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $Traits = @{
                             'name'          = $User.displayName
@@ -161,34 +240,77 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                             'microsoft-365' = $M365Html
                         }
 
-                        $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
+                        $ExistingAsset = $ExistingPeopleAssets | Where-Object { $_.traits.'email-address' -eq $User.userPrincipalName } | Select-Object -First 1
 
-                        $AssetAttribs = @{
-                            'organization-id'        = $OrgId
-                            'flexible-asset-type-id' = $PeopleTypeId
-                            traits                   = $Traits
-                        }
-
+                        # Check if content has changed by comparing hashes
+                        $NeedsUpdate = $true
                         if ($ExistingAsset) {
-                            $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
-                        } else {
-                            $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                            $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueUser' and RowKey eq '$($ExistingAsset.id)'"
+                            if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
+                                $NeedsUpdate = $false
+                                $UserSkippedCount++
+                            }
                         }
-                        Start-Sleep -Milliseconds 100
+
+                        if ($NeedsUpdate) {
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $PeopleTypeId
+                                traits                   = $Traits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                                $AssetId = $ExistingAsset.id
+                            } else {
+                                $CreatedAsset = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                                $AssetId = $CreatedAsset[0].id
+                            }
+
+                            # Cache the hash to avoid unnecessary updates on next sync
+                            $CacheEntry = @{
+                                PartitionKey = 'ITGlueUser'
+                                RowKey       = [string]$AssetId
+                                OrgId        = [string]$OrgId
+                                UserUPN      = $User.userPrincipalName
+                                Hash         = $NewHash
+                            }
+                            Add-CIPPAzDataTableEntity @ITGlueAssetCache -Entity $CacheEntry -Force
+
+                            $UserUpdatedCount++
+                        }
                     } catch {
                         $CompanyResult.Errors.Add("User FA [$($User.userPrincipalName)]: $_")
                     }
                 }
 
-                $CompanyResult.Logs.Add("Users Flexible Assets: Processed $($LicensedUsers.Count) users")
+                # Delete user assets that no longer exist in M365
+                $CurrentUserUPNs = $LicensedUsers | ForEach-Object { $_.userPrincipalName }
+                $OrphanedUserAssets = $ExistingPeopleAssets | Where-Object { $_.traits.'email-address' -notin $CurrentUserUPNs }
+                foreach ($Orphan in $OrphanedUserAssets) {
+                    try {
+                        $UserName = if ($Orphan.traits.name) { $Orphan.traits.name } else { $Orphan.traits.'email-address' }
+                        $null = Invoke-ITGlueRequest -Method DELETE -Endpoint "/flexible_assets/$($Orphan.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
+                        $CompanyResult.Logs.Add("Deleted orphaned user: $UserName")
+
+                        # Remove from cache
+                        $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueUser' and RowKey eq '$($Orphan.id)'"
+                        if ($CachedAsset) {
+                            Remove-AzDataTableEntity @ITGlueAssetCache -Entity $CachedAsset -Force
+                        }
+                    } catch {
+                        $UserName = if ($Orphan.traits.name) { $Orphan.traits.name } else { $Orphan.traits.'email-address' }
+                        $CompanyResult.Errors.Add("Failed to delete orphaned user [$UserName]: $_")
+                    }
+                }
+
+                $CompanyResult.Logs.Add("Users Flexible Assets: $UserUpdatedCount updated, $UserSkippedCount unchanged")
             } catch {
                 $CompanyResult.Errors.Add("Users Flexible Assets block failed: $_")
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # USERS — NATIVE CONTACTS
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.CreateMissingContacts -eq $true) {
             try {
                 $ExistingContacts = Invoke-ITGlueRequest -Method GET -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
@@ -215,7 +337,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/contacts' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'contacts' -Attributes $ContactAttribs
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Contact [$($User.userPrincipalName)]: $_")
                     }
@@ -227,12 +348,12 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # DEVICES — FLEXIBLE ASSETS
-        # ─────────────────────────────────────────────────────────────────────
         if (![string]::IsNullOrEmpty($DeviceTypeId)) {
             try {
-                Add-ITGlueFlexibleAssetField -TypeId $DeviceTypeId -FieldName 'Microsoft 365' -FieldKind 'Textbox' -ShowInList $false -Conn $Conn
+                Add-ITGlueFlexibleAssetFields -TypeId $DeviceTypeId -FieldsToAdd @(
+                    @{ Name = 'Microsoft 365'; Kind = 'Textbox'; ShowInList = $false }
+                ) -Conn $Conn
 
                 $ExistingDeviceAssets = Invoke-ITGlueRequest -Method GET -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
                     'filter[flexible_asset_type_id]' = $DeviceTypeId
@@ -245,9 +366,13 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                     $_.managedDeviceOwnerType -eq 'company'
                 }
 
+                $DeviceUpdatedCount = 0
+                $DeviceSkippedCount = 0
+
                 foreach ($Device in $SyncDevices) {
                     try {
-                        $M365DeviceHtml = @"
+                        # Build HTML WITHOUT timestamp first (for hash calculation)
+                        $M365DeviceHtmlCore = @"
 <p><strong>Serial:</strong> $($Device.serialNumber)</p>
 <p><strong>OS:</strong> $($Device.operatingSystem) $($Device.osVersion)</p>
 <p><strong>Manufacturer / Model:</strong> $($Device.manufacturer) $($Device.model)</p>
@@ -257,45 +382,94 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
 <p><strong>Primary User:</strong> $($Device.userDisplayName) ($($Device.userPrincipalName))</p>
 <p><a href="$CIPPURL/endpoint/reports/devices?customerId=$($Tenant.customerId)" target="_blank">View in CIPP</a> &nbsp;
 <a href="https://intune.microsoft.com/$($Tenant.defaultDomainName)/" target="_blank">Open Intune</a></p>
-<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>
 "@
+
+                        # Hash-based change detection - hash content WITHOUT timestamp
+                        $ContentToHash = "$($Device.deviceName)|$($Device.complianceState)|$($Device.lastSyncDateTime)|$M365DeviceHtmlCore"
+                        $NewHash = Get-StringHash -String $ContentToHash
+
+                        # Add timestamp AFTER hashing (for display only)
+                        $M365DeviceHtml = $M365DeviceHtmlCore + "`n<p><em>Last updated: $(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC</em></p>"
 
                         $DeviceTraits = @{
                             'name'          = $Device.deviceName
                             'microsoft-365' = $M365DeviceHtml
                         }
 
-                        $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.name -eq $Device.deviceName } | Select-Object -First 1
+                        $ExistingAsset = $ExistingDeviceAssets | Where-Object { $_.traits.name -eq $Device.deviceName } | Select-Object -First 1
 
-                        $AssetAttribs = @{
-                            'organization-id'        = $OrgId
-                            'flexible-asset-type-id' = $DeviceTypeId
-                            traits                   = $DeviceTraits
-                        }
-
+                        # Check if content has changed by comparing hashes
+                        $NeedsUpdate = $true
                         if ($ExistingAsset) {
-                            $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
-                        } else {
-                            $null = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                            $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueDevice' and RowKey eq '$($ExistingAsset.id)'"
+                            if ($CachedAsset -and $CachedAsset.Hash -eq $NewHash) {
+                                $NeedsUpdate = $false
+                                $DeviceSkippedCount++
+                            }
                         }
-                        Start-Sleep -Milliseconds 100
+
+                        if ($NeedsUpdate) {
+                            $AssetAttribs = @{
+                                'organization-id'        = $OrgId
+                                'flexible-asset-type-id' = $DeviceTypeId
+                                traits                   = $DeviceTraits
+                            }
+
+                            if ($ExistingAsset) {
+                                $null = Invoke-ITGlueRequest -Method PATCH -Endpoint "/flexible_assets/$($ExistingAsset.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -ResourceId $ExistingAsset.id -Attributes $AssetAttribs
+                                $AssetId = $ExistingAsset.id
+                            } else {
+                                $CreatedAsset = Invoke-ITGlueRequest -Method POST -Endpoint '/flexible_assets' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'flexible-assets' -Attributes $AssetAttribs
+                                $AssetId = $CreatedAsset[0].id
+                            }
+
+                            # Cache the hash to avoid unnecessary updates on next sync
+                            $CacheEntry = @{
+                                PartitionKey = 'ITGlueDevice'
+                                RowKey       = [string]$AssetId
+                                OrgId        = [string]$OrgId
+                                DeviceName   = $Device.deviceName
+                                Hash         = $NewHash
+                            }
+                            Add-CIPPAzDataTableEntity @ITGlueAssetCache -Entity $CacheEntry -Force
+
+                            $DeviceUpdatedCount++
+                        }
                     } catch {
                         $CompanyResult.Errors.Add("Device FA [$($Device.deviceName)]: $_")
                     }
                 }
 
-                $CompanyResult.Logs.Add("Device Flexible Assets: Processed $($SyncDevices.Count) devices")
+                # Delete device assets that no longer exist in M365
+                $CurrentDeviceNames = $SyncDevices | ForEach-Object { $_.deviceName }
+                $OrphanedDeviceAssets = $ExistingDeviceAssets | Where-Object { $_.traits.name -notin $CurrentDeviceNames }
+                foreach ($Orphan in $OrphanedDeviceAssets) {
+                    try {
+                        $DeviceName = if ($Orphan.traits.name) { $Orphan.traits.name } else { "ID: $($Orphan.id)" }
+                        $null = Invoke-ITGlueRequest -Method DELETE -Endpoint "/flexible_assets/$($Orphan.id)" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
+                        $CompanyResult.Logs.Add("Deleted orphaned device: $DeviceName")
+
+                        # Remove from cache
+                        $CachedAsset = Get-CIPPAzDataTableEntity @ITGlueAssetCache -Filter "PartitionKey eq 'ITGlueDevice' and RowKey eq '$($Orphan.id)'"
+                        if ($CachedAsset) {
+                            Remove-AzDataTableEntity @ITGlueAssetCache -Entity $CachedAsset -Force
+                        }
+                    } catch {
+                        $DeviceName = if ($Orphan.traits.name) { $Orphan.traits.name } else { "ID: $($Orphan.id)" }
+                        $CompanyResult.Errors.Add("Failed to delete orphaned device [$DeviceName]: $_")
+                    }
+                }
+
+                $CompanyResult.Logs.Add("Device Flexible Assets: $DeviceUpdatedCount updated, $DeviceSkippedCount unchanged")
             } catch {
                 $CompanyResult.Errors.Add("Device Flexible Assets block failed: $_")
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
         # DEVICES — NATIVE CONFIGURATIONS
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.CreateMissingConfigurations -eq $true) {
             try {
-                # Cache configuration types for the whole sync run (one API call)
+                # Cache configuration types for the whole sync run
                 $ConfigTypes = Invoke-ITGlueRequest -Method GET -Endpoint '/configuration_types' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl
 
                 $ExistingConfigs = Invoke-ITGlueRequest -Method GET -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -QueryParams @{
@@ -342,7 +516,6 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                         } else {
                             $null = Invoke-ITGlueRequest -Method POST -Endpoint '/configurations' -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -ResourceType 'configurations' -Attributes $ConfigAttribs
                         }
-                        Start-Sleep -Milliseconds 100
                     } catch {
                         $CompanyResult.Errors.Add("Config [$($Device.deviceName)]: $_")
                     }
@@ -354,9 +527,17 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
             }
         }
 
-        # ─────────────────────────────────────────────────────────────────────
+        # CONDITIONAL ACCESS POLICIES — FLEXIBLE ASSETS
+        if ($ITGlueConfig.SyncConditionalAccessPolicies -eq $true -and ![string]::IsNullOrEmpty($CAPTypeId) -and $ConditionalAccessPolicies -and $ConditionalAccessPolicies.Count -gt 0) {
+            $CAPResult = Sync-ITGlueConditionalAccessPolicies -CAPTypeId $CAPTypeId -OrgId $OrgId -Conn $Conn `
+                -ConditionalAccessPolicies $ConditionalAccessPolicies -ITGlueAssetCache $ITGlueAssetCache `
+                -TenantFilter $TenantFilter -CIPPURL $CIPPURL -Tenant $Tenant
+
+            $CompanyResult.Errors.AddRange($CAPResult.Errors)
+            $CompanyResult.Logs.AddRange($CAPResult.Logs)
+        }
+
         # M365 OVERVIEW — update organisation quick-notes (preserving existing content)
-        # ─────────────────────────────────────────────────────────────────────
         if ($ITGlueConfig.ImportDomains -eq $true -and $Domains) {
             try {
                 $VerifiedDomainList = ($Domains | Where-Object { $_.isVerified -eq $true }).id
@@ -381,8 +562,7 @@ $(if ($Mailbox) { "<p><strong>Mailbox Size:</strong> $($Mailbox.TotalItemSize)</
                 }
 
                 # CIPP managed section wrapped in a <div> with a class attribute.
-                # HTML comments (<!-- -->) are stripped by ITGlue's sanitizer, so we
-                # use a real element as our marker instead.
+                # HTML comments (<!-- -->) are stripped by ITGlue's sanitizer, so we use a real element as our marker instead.
                 $CippMarkerStart = '<div class="cipp-managed">'
                 $CippMarkerEnd = '</div>'
 
@@ -417,11 +597,17 @@ $CippMarkerEnd
                 $ExistingOrg = Invoke-ITGlueRequest -Method GET -Endpoint "/organizations/$OrgId" -Headers $Conn.Headers -BaseUrl $Conn.BaseUrl -FirstPageOnly
                 $ExistingNotes = $ExistingOrg.'quick-notes'
 
-                if ($ExistingNotes -and $ExistingNotes -match '\(CIPP Managed\)') {
-                    # Content-based match: use GREEDY .* to capture everything from
-                    # the first M365 Overview heading to the LAST (CIPP Managed) stamp,
-                    # removing all duplicate CIPP sections in one sweep.
-                    $QuickNotes = $ExistingNotes -replace '(?s)(<hr\s*/?>)?\s*<h3>Microsoft 365 Overview</h3>.*(CIPP Managed)</em></p>', $CippSection
+                # ITGlue reformats HTML, so use flexible regex that handles whitespace variations
+                if ($ExistingNotes -and $ExistingNotes -match '<div\s+class="cipp-managed">') {
+                    # CIPP section exists - replace ALL occurrences
+                    # Use non-capturing group and match any whitespace after opening tag
+                    $QuickNotes = $ExistingNotes -replace '(?s)<div\s+class="cipp-managed">.*?</div>\s*', ''
+                    # Append fresh CIPP section to cleaned notes
+                    if ($QuickNotes.Trim()) {
+                        $QuickNotes = $QuickNotes.TrimEnd() + "`n`n" + $CippSection
+                    } else {
+                        $QuickNotes = $CippSection -replace '<hr/>\s*', ''
+                    }
                 } elseif ($ExistingNotes -and $ExistingNotes.Trim()) {
                     # No previous CIPP section found - append below existing user content
                     $QuickNotes = $ExistingNotes.TrimEnd() + "`n`n" + $CippSection
